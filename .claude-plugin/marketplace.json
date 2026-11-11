@@ -1,0 +1,11 @@
+{
+  "name": "work-ledger",
+  "owner": { "name": "keber" },
+  "plugins": [
+    {
+      "name": "work-ledger",
+      "source": "./mod/work-ledger",
+      "description": "Pane that shows pending Claude work threads from the work-ledger"
+    }
+  ]
+}
