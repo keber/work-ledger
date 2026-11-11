@@ -1,0 +1,38 @@
+{
+  "name": "work-ledger",
+  "version": "0.1.0",
+  "description": "Read-only pane showing pending and at-risk work from the work-ledger out/ledger.json.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "ledgerPath": {
+      "type": "string",
+      "title": "Ledger path",
+      "description": "ledger.json file the pane reads. A leading ~ is your home dir.",
+      "default": "~/Proyectos/work-ledger/out/ledger.json"
+    },
+    "projectRoot": {
+      "type": "string",
+      "title": "Project root",
+      "description": "Working directory of the work_ledger refresh command. A leading ~ is your home dir.",
+      "default": "~/Proyectos/work-ledger"
+    },
+    "pythonCommand": {
+      "type": "string",
+      "title": "Python command",
+      "description": "Python executable used to run the refresh.",
+      "default": "python"
+    },
+    "openOnStart": {
+      "type": "boolean",
+      "title": "Open on start",
+      "description": "Open the ledger pane when a session starts.",
+      "default": false
+    },
+    "piecesDir": {
+      "type": "string",
+      "title": "Pieces inbox",
+      "description": "Curation inbox folder; the newest YYYY-MM-DD folder in it is shown.",
+      "default": "~/Proyectos/work-ledger/out/pieces/inbox"
+    }
+  }
+}

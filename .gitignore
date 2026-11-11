@@ -1,0 +1,9 @@
+out/
+__pycache__/
+*.egg-info/
+overrides.json
+curation-denylist.txt
+mod/work-ledger/.claude-plugin/types/
+mod/work-ledger/tsconfig.json
+local/
+work-ledger.local.toml

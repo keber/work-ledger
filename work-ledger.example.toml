@@ -1,0 +1,24 @@
+# Template for work-ledger.local.toml (gitignored). Copy it, then set your own values:
+#   cp work-ledger.example.toml work-ledger.local.toml
+# Precedence for every setting: CLI flag > environment variable > this file > built-in default.
+# Paths may start with `~`.
+
+[curation]
+# Company names and domains the public sanitizer rejects (substring, case and accent
+# insensitive). Empty or unset: public pieces get no company check, and curate warns.
+# CLI: --company TERM (repeatable). Env: WORK_LEDGER_COMPANY_TERMS (comma-separated).
+company_terms = ["acme", "acmefruit"]
+
+# Where `pieces approve` copies approved pieces.
+# CLI: --publish-dir. Env: WORK_LEDGER_PUBLISH_DIR. Default: ~/Documents/work-ledger/published
+publish_dir = "~/Documents/work-ledger/published"
+
+# claude executable for curate (optional). CLI: --claude. Env: WORK_LEDGER_CLAUDE.
+# Default: claude on PATH.
+# claude = "~/.local/bin/claude.exe"
+
+[inventory]
+# Directories the git inventory scans.
+# CLI: --root (repeatable). Env: WORK_LEDGER_ROOTS (os.pathsep-separated).
+# Default: ~/Proyectos and ~/source/repos
+roots = ["~/Proyectos", "~/source/repos"]
