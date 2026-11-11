@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { LEGEND, cells, percent, riskFacts, riskIndicators, stackSegments, statusKey, wholePercents } from '../hooks/style'
+import { LEGEND, apportion, barSvg, cells, percent, riskFacts, riskIndicators, stackSegments, statusKey, wholePercents } from '../hooks/style'
 import { parseLedger } from '../hooks/view-model'
 import { ledgerText, project, thread } from './fixtures'
 
@@ -108,5 +108,26 @@ describe('summary counts', () => {
     if (!parsed.ok) throw new Error(parsed.error.message)
     expect(parsed.view.counts.goingCold).toBe(1)
     expect(parsed.view.counts.unbacked).toBe(8)
+  })
+})
+
+describe('barSvg', () => {
+  test('whole-pixel segments fill the bar exactly, with rounded ends', () => {
+    expect(apportion([1, 1, 1], 3, 64)).toEqual([22, 21, 21])
+    expect(apportion([0, 0], 0, 64)).toEqual([0, 0])
+    const svg = barSvg(
+      [
+        { value: 1, fill: 'fill-a' },
+        { value: 1, fill: 'fill-b' },
+        { value: 1, fill: 'fill-c' },
+      ],
+      64,
+      6,
+    )
+    expect(svg).toMatch(/^<svg [^>]*width="64" height="6" viewBox="0 0 64 6">/)
+    expect(svg).toContain('<rect x="0" y="0" width="22" height="6" fill="fill-a"/>')
+    expect(svg).toContain('<rect x="22" y="0" width="21" height="6" fill="fill-b"/>')
+    expect(svg).toContain('<rect x="43" y="0" width="21" height="6" fill="fill-c"/>')
+    expect(svg).toContain('rx="3"')
   })
 })

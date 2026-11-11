@@ -161,17 +161,52 @@ export function stackSegments(counts: Readonly<Record<string, number>>): Segment
  * "33.3%" makes it refuse the whole tree.
  */
 export function wholePercents(values: readonly number[], total: number): number[] {
-  if (!(total > 0)) return values.map(() => 0)
-  const exact = values.map(v => (Math.max(0, v) / total) * 100)
+  return apportion(values, total, 100)
+}
+
+/** Splits `whole` into integers proportional to `values` that add up to it (largest remainder). */
+export function apportion(values: readonly number[], total: number, whole: number): number[] {
+  if (!(total > 0) || !(whole > 0)) return values.map(() => 0)
+  const exact = values.map(v => (Math.max(0, v) / total) * whole)
   const floors = exact.map(Math.floor)
-  let left = 100 - floors.reduce((a, b) => a + b, 0)
+  let left = whole - floors.reduce((a, b) => a + b, 0)
   const order = exact.map((x, i) => ({ i, rest: x - floors[i]! })).sort((a, b) => b.rest - a.rest || a.i - b.i)
   for (const { i } of order) {
     if (left <= 0) break
     floors[i]! += 1
     left--
   }
-  return floors.map(p => Math.min(100, Math.max(0, p)))
+  return floors.map(p => Math.min(whole, Math.max(0, p)))
+}
+
+/**
+ * The per-project bar as SVG markup: `width` x `height` px, rounded ends, one
+ * rect per segment with whole-pixel widths that fill the bar exactly. `fills`
+ * come from the palette; nothing here is a color of its own.
+ */
+export function barSvg(parts: readonly { value: number; fill: string }[], width: number, height: number): string {
+  const w = Math.max(1, Math.round(width))
+  const h = Math.max(1, Math.round(height))
+  const total = parts.reduce((sum, p) => sum + Math.max(0, p.value), 0)
+  const widths = apportion(
+    parts.map(p => p.value),
+    total,
+    w,
+  )
+  let x = 0
+  const rects = parts
+    .map((p, i) => {
+      const rect = widths[i]! > 0 ? `<rect x="${x}" y="0" width="${widths[i]}" height="${h}" fill="${p.fill}"/>` : ''
+      x += widths[i]!
+      return rect
+    })
+    .join('')
+  const r = Math.floor(h / 2)
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
+    `<clipPath id="bar"><rect width="${w}" height="${h}" rx="${r}" ry="${r}"/></clipPath>` +
+    `<g clip-path="url(#bar)">${rects}</g></svg>`
+  )
 }
 
 /** A Box size the engine accepts: a whole, finite number of cells, or "N%" with N 0..100. */

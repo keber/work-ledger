@@ -35,6 +35,7 @@ import {
   riskFacts,
   riskIndicators,
   stackSegments,
+  barSvg,
   statusKey,
 } from './style'
 import type { Indicators } from './style'
@@ -67,7 +68,12 @@ const DEFAULTS = {
 const PIECE_TIMEOUT_MS = 120_000
 const STALE_PIECE_MS = PIECE_TIMEOUT_MS + 60_000
 /** Cells across a per-project stacked bar (desktop only). */
-const BAR_WIDTH = 12
+const BAR_CELLS = 10
+/** The desktop bar: an Svg this many CSS px across and down, inside the BAR_CELLS slot. */
+const BAR_PX = 64
+const BAR_PX_HIGH = 6
+/** Cells of the right-aligned thread-count slot of a project row. */
+const COUNT_CELLS = 3
 /** Items a collapsed section shows before its "Show N more" link. */
 const COLLAPSED_ITEMS = 3
 /** The expanded-ids entry of the "repos without sessions" group. */
@@ -336,7 +342,10 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Text, Button } = elements
+    // The terminal's table has no Svg: its bar stays a row of Boxes.
+    const Svg = 'Svg' in elements ? elements.Svg : undefined
     const cfg = await resolveConfig($, configured)
     const load = await read($, ledger)
     const selectedId = await read($, selected)
@@ -352,6 +361,7 @@ export const register: Register = (on, options) => {
     const isRunning = refreshState.isRunning && now - refreshState.startedAt < STALE_RUN_MS
     // The terminal draws one text size and no bars; everything else degrades in place.
     const isTerminal = e.surface === 'terminal'
+    const rowHover = isTerminal ? ROW_HOVER : palette.fills.paused
 
     const refreshButton = (
       <Button key="refresh" variant="secondary" onPress={() => (isRunning ? undefined : startRefresh($, cfg))}>
@@ -428,6 +438,8 @@ export const register: Register = (on, options) => {
       isNameDim?: boolean
       indicators?: Indicators
       meta: string[]
+      /** A right-aligned, fixed-width number slot, so every bar ends at the same line. */
+      count?: string
       onPress?: () => unknown
       /** A project row: its chevron is the press target and leads the row. */
       chevron?: { glyph: string; color: ThemeKey }
@@ -446,6 +458,7 @@ export const register: Register = (on, options) => {
         (warning ? 2 : 0) +
         (isInline ? warning.length + 1 : 0) +
         (r.extraWidth ?? 0) +
+        (r.count === undefined ? 0 : COUNT_CELLS + 1) +
         (r.onPress && !r.chevron ? 2 : 0)
       const room = Math.max(12, cols - rightWidth - 3 - (r.indent ? 2 : 0))
       const name = (
@@ -482,7 +495,7 @@ export const register: Register = (on, options) => {
           alignItems="center"
           gap={1}
           paddingLeft={r.indent ? 2 : 0}
-          hover={{ backgroundColor: ROW_HOVER }}
+          hover={{ backgroundColor: rowHover }}
         >
           <Box flexDirection="row" gap={1} flexGrow={1} flexShrink={1} alignItems="center">
             {lead}
@@ -520,6 +533,15 @@ export const register: Register = (on, options) => {
                 {m}
               </Text>
             ))}
+            {r.count === undefined
+              ? []
+              : [
+                  <Box flexDirection="row" width={cells(COUNT_CELLS)} justifyContent="flex-end">
+                    <Text size="caption" dimColor tabular>
+                      {r.count}
+                    </Text>
+                  </Box>,
+                ]}
             {r.onPress && !r.chevron
               ? [
                   <Button key={r.key} plain dimColor onPress={r.onPress}>
@@ -533,16 +555,20 @@ export const register: Register = (on, options) => {
     }
 
     /**
-     * The API has no tooltip: a keyed Box is a hover scope, and a hidden
-     * absolute Box in it is revealed while the pointer is over the scope.
+     * The API has no tooltip and no z-order: an overlay below the row fell
+     * behind the next one. So the text is revealed in the row itself: a keyed
+     * Box is a hover scope, and a hidden sibling in it (display none, hover
+     * flex) appears inline beside the target while the pointer is on it.
      */
     function reveal(key: string, target: RenderChildren, text: string) {
       return (
-        <Box key={key} flexDirection="row">
-          {target}
-          <Box position="absolute" top={1} right={0} display="none" hover={{ display: 'flex' }}>
-            <Text size="caption" inverse tabular>{` ${text} `}</Text>
+        <Box key={key} flexDirection="row" gap={1} alignItems="center">
+          <Box display="none" hover={{ display: 'flex' }}>
+            <Text size="caption" dimColor tabular>
+              {clip(text, Math.max(12, cols - 16))}
+            </Text>
           </Box>
+          {target}
         </Box>
       )
     }
@@ -649,28 +675,63 @@ export const register: Register = (on, options) => {
       const segments = stackSegments(p.counts)
       const worst = p.atRisk ? 'error' : (segments[0] ? statusKey(segments[0].state, null) : 'inactive')
       const summary = segments.map(s => `${s.count} ${s.state}`).join(' · ')
+      // A fixed slot, so every bar starts and ends on the same vertical line.
+      // Hover swaps the bar for the counts: hover can only reveal (display
+      // flex), never hide, so the counts are a later sibling drawn over the bar
+      // at top 0 of its own slot, on the row's hover color. They stay in the row:
+      // nothing reaches the next one. Their nearest keyed Box is the row, so the
+      // whole row's hover shows them.
       const bar =
-        isTerminal || segments.length === 0
-          ? null
-          : reveal(
-              `bar:${p.id}`,
-              <Box flexDirection="row" width={cells(BAR_WIDTH)} height={1}>
+        segments.length === 0 ? null : (
+          <Box flexDirection="row" width={cells(BAR_CELLS)} height={1} alignItems="center">
+            {Svg && !isTerminal ? (
+              <Svg
+                source={barSvg(
+                  segments.map(s => ({ value: s.count, fill: palette.fills[stateFill(s.state)] })),
+                  BAR_PX,
+                  BAR_PX_HIGH,
+                )}
+                alt={summary}
+                width={BAR_PX}
+                height={BAR_PX_HIGH}
+              />
+            ) : (
+              <Box flexDirection="row" width={cells(BAR_CELLS)} height={1}>
                 {segments
                   .filter(s => s.percent > 0)
                   .map(s => (
-                    <Box width={percent(s.percent)} height={1} backgroundColor={palette.fills[stateFill(s.state)]} />
+                    <Box width={percent(s.percent)} height={1} backgroundColor={s.fill} />
                   ))}
-              </Box>,
-              summary,
-            )
+              </Box>
+            )}
+            {isTerminal
+              ? []
+              : [
+                  <Box
+                    position="absolute"
+                    top={0}
+                    right={0}
+                    display="none"
+                    hover={{ display: 'flex' }}
+                    backgroundColor={rowHover}
+                  >
+                    <Text size="caption" dimColor tabular>
+                      {clip(summary, Math.max(BAR_CELLS, Math.floor(cols / 2)))}
+                    </Text>
+                  </Box>,
+                ]}
+          </Box>
+        )
       const head = row({
         key: `project:${p.id}`,
         name: p.name,
         chevron: { glyph: isOpen ? '▾' : '▸', color: worst },
-        meta: [`${p.threadIds.length}`],
+        meta: [],
+        count: `${p.threadIds.length}`,
         onPress: toggle(p.id),
-        extra: bar,
-        extraWidth: bar === null ? 0 : BAR_WIDTH + 1,
+        // Rows without a bar keep its room, so the counts still line up.
+        extra: bar ?? <Box width={cells(BAR_CELLS)} height={1} />,
+        extraWidth: BAR_CELLS + 1,
       })
       if (!isOpen) return [head]
       return [

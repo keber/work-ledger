@@ -252,30 +252,82 @@ test('risk facts are compact indicators, not prose', { options: OPTIONS }, async
   }
 })
 
-test('the per-project bar is drawn to scale on desktop and left out on the terminal', { options: OPTIONS }, async ($, on) => {
-  engine(on, () => SAMPLE)
+/** Every element under `node` that `hit` accepts. */
+function allIn(node: unknown, hit: (p: Part) => boolean, out: Part[] = []): Part[] {
+  if (typeof node !== 'object' || node === null) return out
+  const part = node as Part
+  if (hit(part)) out.push(part)
+  for (const child of part.children ?? []) allIn(child, hit, out)
+  return out
+}
+
+const BAR_TEST_LEDGER = ledgerText(
+  [project('p1'), project('p2'), project('p3')],
+  [
+    thread('a', { projectId: 'p1', effectiveState: 'open' }),
+    thread('b', { projectId: 'p1', effectiveState: 'stale' }),
+    ...Array.from({ length: 11 }, (_, i) => thread(`c${i}`, { projectId: 'p2', effectiveState: 'likely-done' })),
+    thread('d', { projectId: 'p3', effectiveState: 'at-risk' }),
+  ],
+)
+
+test('the bar is a thin Svg on desktop, to scale, in a fixed slot before a fixed count', { options: OPTIONS }, async ($, on) => {
+  engine(on, () => BAR_TEST_LEDGER)
   await $.command.run(LEDGER_COMMAND)
 
-  const desktop = await $.ui.mount({ ...paneAt(40), surface: 'desktop' })
-  const bar = await desktop.find({ key: 'bar:p2' })
-  const segments = ((bar?.children[0] as Part | undefined)?.children ?? []) as Part[]
-  expect(segments.map(s => [s.props?.backgroundColor, s.props?.width])).toEqual([
-    [PALETTES.universal.fills.open, '50%'],
-    [PALETTES.universal.fills.goingCold, '50%'],
-  ])
-  // Hovering the bar reveals the counts per state.
-  const hidden = findIn(bar, p => p.type === 'Box' && p.props?.display === 'none')
-  expect(JSON.stringify(hidden)).toMatch(/1 open · 1 stale/)
+  const ui = await $.ui.mount({ ...paneAt(40), surface: 'desktop' })
+  const p1 = await ui.find({ key: 'row:project:p1' })
+  const svg = findIn(p1, p => p.type === 'Svg')
+  expect(svg?.props).toMatchObject({ width: 64, height: 6, alt: '1 open · 1 stale' })
+  const source = String(svg?.props?.source)
+  expect(source).toContain(`width="32" height="6" fill="${PALETTES.universal.fills.open}"`)
+  expect(source).toContain(`width="32" height="6" fill="${PALETTES.universal.fills.goingCold}"`)
+  expect(source).toMatch(/rx="3"/)
+
+  // Every bar has the same size; every count sits in the same 3-cell slot.
+  const tree = await ui.drawn()
+  const svgs = allIn(tree, p => p.type === 'Svg')
+  expect(svgs).toHaveLength(3)
+  expect(new Set(svgs.map(v => `${v.props?.width}x${v.props?.height}`))).toEqual(new Set(['64x6']))
+  for (const id of ['p1', 'p2', 'p3']) {
+    const row = await ui.find({ key: `row:project:${id}` })
+    const slot = findIn(row, p => p.type === 'Box' && p.props?.width === 3)
+    expect(slot?.props?.justifyContent).toBe('flex-end')
+    expect(JSON.stringify(slot?.children)).toMatch(id === 'p2' ? /"11"/ : /"[12]"/)
+  }
+
+  // Hover swaps the bar for the counts inside the row; nothing is placed below it.
+  const overlay = findIn(p1, p => p.type === 'Box' && p.props?.display === 'none')
+  expect(overlay?.props).toMatchObject({ position: 'absolute', top: 0 })
+  expect(JSON.stringify(overlay?.children)).toMatch(/1 open · 1 stale/)
+  expect(allIn(tree, p => p.type === 'Box' && p.props?.position === 'absolute' && p.props?.top !== 0)).toEqual([])
+  // The row hover is the palette's pale grey, not a theme grey.
+  const rowEl = findIn(tree, p => p.props?.key === 'row:project:p1') as (Part & { hover?: unknown }) | undefined
+  expect(rowEl?.hover ?? rowEl?.props?.hover).toMatchObject({ backgroundColor: PALETTES.universal.fills.paused })
+
   // A legend under the label names the fills.
   for (const word of ['at risk', 'going cold', 'open', 'done']) {
-    expect(await desktop.find({ type: 'Text', text: new RegExp(`^${word}$`) })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: new RegExp(`^${word}$`) })).toBeDefined()
   }
-  await desktop.unmount()
+  await ui.unmount()
+})
 
-  const terminal = await $.ui.mount({ ...paneAt(40), surface: 'terminal' })
-  expect(await terminal.find({ key: 'bar:p2' })).toBeUndefined()
-  expect(await terminal.find({ type: 'Text', text: /^going cold$/ })).toBeUndefined()
-  await terminal.unmount()
+test('on the terminal the bar is a row of Boxes on theme keys, with no hover text', { options: OPTIONS }, async ($, on) => {
+  engine(on, () => BAR_TEST_LEDGER)
+  await $.command.run(LEDGER_COMMAND)
+
+  const ui = await $.ui.mount({ ...paneAt(40), surface: 'terminal' })
+  const tree = await ui.drawn()
+  expect(allIn(tree, p => p.type === 'Svg')).toEqual([])
+  const p1 = await ui.find({ key: 'row:project:p1' })
+  const bar = findIn(p1, p => p.type === 'Box' && p.props?.width === 10 && (p.children ?? []).length > 0 && !(p.children ?? []).some(c => (c as Part).type === 'Box' && (c as Part).props?.width === 10))
+  expect(((bar?.children ?? []) as Part[]).map(c => [c.props?.backgroundColor, c.props?.width])).toEqual([
+    ['subtle', '50%'],
+    ['ide', '50%'],
+  ])
+  expect(findIn(p1, p => p.props?.display === 'none')).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^going cold$/ })).toBeUndefined()
+  await ui.unmount()
 })
 
 test('a project row leads with its chevron, colored by its worst state, which toggles it', { options: OPTIONS }, async ($, on) => {
@@ -621,9 +673,10 @@ test('colorScheme picks the fills: dark draws the bar and legend from the dark p
   await $.command.run(LEDGER_COMMAND)
 
   const ui = await $.ui.mount({ ...paneAt(40), surface: 'desktop' })
-  const bar = await ui.find({ key: 'bar:p2' })
-  const segments = ((bar?.children[0] as Part | undefined)?.children ?? []) as Part[]
-  expect(segments.map(s => s.props?.backgroundColor)).toEqual([PALETTES.dark.fills.open, PALETTES.dark.fills.goingCold])
+  const svg = findIn(await ui.find({ key: 'row:project:p2' }), p => p.type === 'Svg')
+  expect(String(svg?.props?.source)).toContain(PALETTES.dark.fills.open)
+  expect(String(svg?.props?.source)).toContain(PALETTES.dark.fills.goingCold)
+  expect(String(svg?.props?.source)).not.toContain(PALETTES.universal.fills.open)
   const colors = colorsIn(await ui.drawn())
   for (const fill of [PALETTES.dark.fills.atRisk, PALETTES.dark.fills.done]) expect(colors.has(fill)).toBe(true)
   expect(colors.has(PALETTES.universal.fills.open)).toBe(false)
