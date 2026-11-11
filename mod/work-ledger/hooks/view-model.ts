@@ -10,6 +10,11 @@ import type {
 
 export const SUPPORTED_SCHEMA_VERSION = 2
 export const OPEN_LIMIT = 15
+/** An open or active thread idle this long is going cold (it turns stale at 30). */
+export const GOING_COLD_DAYS = 14
+
+export const isGoingCold = (state: string, daysIdle: number | null): boolean =>
+  (state === 'open' || state === 'active') && daysIdle !== null && daysIdle >= GOING_COLD_DAYS
 const NO_PROJECT_ID = '(none)'
 
 export type ParseResult =
@@ -171,6 +176,10 @@ function buildView(generatedAt: string, rawProjects: unknown[], rawThreads: unkn
   const atRisk = all.filter(t => t.effectiveState === 'at-risk')
   const openAll = all.filter(t => t.effectiveState === 'open' || t.effectiveState === 'active')
   const projectsAtRisk = projects.filter(id => projectsById[id]!.atRisk)
+  // Commits on no remote: feature branches (thread git) plus main worktrees (project git).
+  const unbacked =
+    all.reduce((sum, t) => sum + (t.notOnRemote ?? 0), 0) +
+    projects.reduce((sum, id) => sum + (projectsById[id]!.notOnRemote ?? 0), 0)
 
   return {
     generatedAt,
@@ -178,6 +187,8 @@ function buildView(generatedAt: string, rawProjects: unknown[], rawThreads: unkn
       projectsAtRisk: projectsAtRisk.length,
       threadsAtRisk: atRisk.length,
       open: openAll.length,
+      goingCold: openAll.filter(t => isGoingCold(t.effectiveState, t.daysIdle)).length,
+      unbacked,
     },
     atRiskRecent: atRisk.filter(t => t.recency === 'recent').sort(byLastAtDesc).map(t => t.id),
     projectsAtRisk,
@@ -232,46 +243,6 @@ export function clip(text: string, width: number): string {
   const flat = text.replace(/\s+/g, ' ').trim()
   if (width <= 0) return ''
   return flat.length <= width ? flat : `${flat.slice(0, Math.max(0, width - 1))}…`
-}
-
-/**
- * Splits `budget` rows among sections that want `needs` rows: each non-empty
- * section first gets up to two, then the rest goes in order.
- */
-export function allocateRows(budget: number, needs: readonly number[]): number[] {
-  const out = needs.map(() => 0)
-  let left = Math.max(0, Math.floor(budget))
-  for (const pass of [2, Infinity]) {
-    needs.forEach((need, i) => {
-      const give = Math.min(need - out[i]!, pass === 2 ? 2 - out[i]! : need, left)
-      if (give > 0) {
-        out[i]! += give
-        left -= give
-      }
-    })
-  }
-  return out
-}
-
-/**
- * Rows per list section. An expanded section takes all its items plus its
- * "Show less" row, even past `budget` (the pane body scrolls). The others
- * share what is left as `allocateRows` does, and each non-empty one keeps at
- * least one row so its "+N more" control stays reachable.
- */
-export function planSections(
-  budget: number,
-  sections: readonly { count: number; isExpanded: boolean }[],
-): number[] {
-  const expandedRows = sections.reduce((sum, s) => sum + (s.isExpanded ? s.count + 1 : 0), 0)
-  const shared = allocateRows(
-    budget - expandedRows,
-    sections.map(s => (s.isExpanded ? 0 : s.count)),
-  )
-  return sections.map((s, i) => {
-    if (s.isExpanded) return s.count + 1
-    return s.count > 0 ? Math.max(1, shared[i]!) : 0
-  })
 }
 
 const cut = (text: string, width: number): string =>

@@ -1,6 +1,7 @@
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
+import { PALETTES } from '../hooks/palette'
 import { day, ledgerText, project, thread } from './fixtures'
 
 const LEDGER_PATH = 'C:/fixture/out/ledger.json'
@@ -74,12 +75,21 @@ test('the list shows each section and the header counts', { options: OPTIONS }, 
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...paneAt(40), surface })
-    expect(await ui.find({ text: /1 projects at risk · 2 threads at risk · 1 open/ })).toBeDefined()
-    expect((await ui.find({ key: 'risk:r1' }))?.text).toMatch(/proj-p1 · Recent risky · 1d · unpushed, 4 not on remote/)
+    // The summary strip: at risk (recent), going cold, commits with no backup, to review.
+    expect(await ui.find({ type: 'Text', text: /^1 at risk$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^0 going cold$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^6 no backup$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^0 to review$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Updated / })).toBeDefined()
+    // Project name first, then the thread title.
+    expect((await ui.find({ key: 'row:risk:r1' }))?.text).toMatch(/proj-p1 · Recent risky/)
+    // The row's press target is a small "›"; the name sits outside it so its size applies.
+    expect((await ui.find({ key: 'risk:r1' }))?.text).toBe('›')
     expect(await ui.find({ key: 'risk:old1' })).toBeUndefined()
-    expect(await ui.find({ text: /proj-p1 · modified, 2 not on remote · 1d · 1 older at risk/ })).toBeDefined()
+    expect(await ui.find({ key: 'riskproj:p1' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /1 older at risk/ })).toBeDefined()
     expect(await ui.find({ key: 'open:o1' })).toBeDefined()
-    expect((await ui.find({ key: 'project:p2' }))?.text).toMatch(/proj-p2 · 1 open, 1 stale/)
+    expect((await ui.find({ key: 'row:project:p2' }))?.text).toMatch(/proj-p2/)
     // Stale threads appear only once their project is expanded.
     expect(await ui.find({ text: /Stale one/ })).toBeUndefined()
     await ui.press({ key: 'project:p2' })
@@ -115,80 +125,216 @@ const MANY = ledgerText(
   ),
 )
 
-/**
- * Rows the tree takes on the terminal: a row Box, a Text or a Button is one
- * row; a `marginTop: 'md'` adds one; `rowGap: 'xs'` adds none there.
- */
-function countRows(node: unknown): number {
-  if (typeof node !== 'object' || node === null) return 0
-  const el = node as { type: string; props?: Record<string, unknown>; children?: unknown[] }
-  const margin = el.props?.marginTop === 'md' ? 1 : 0
-  if (el.type === 'Box' && el.props?.flexDirection !== 'row') {
-    return margin + (el.children ?? []).reduce<number>((sum, c) => sum + countRows(c), 0)
-  }
-  return margin + 1
-}
-
 const keysStarting = async (ui: { findAll: (q: { type: string }) => Promise<{ key: string | undefined }[]> }, prefix: string) =>
   (await ui.findAll({ type: 'Button' })).filter(b => b.key?.startsWith(prefix)).length
 
-test('the lists fit the rows given, ending in a "+N more" control', { options: OPTIONS }, async ($, on) => {
+test('a collapsed section shows 3 items and "Show N more" on its label row', { options: OPTIONS }, async ($, on) => {
   engine(on, () => MANY)
   await $.command.run(LEDGER_COMMAND)
 
   for (const surface of SURFACES) {
-    const rows = 20
-    const ui = await $.ui.mount({ ...paneAt(rows), surface })
-    expect(countRows(await ui.drawn())).toBeLessThanOrEqual(rows)
-    expect((await ui.find({ key: 'more:risk' }))?.text).toMatch(/^\+\d+ more$/)
-    expect((await ui.find({ key: 'more:open' }))?.text).toMatch(/^\+\d+ more$/)
+    const ui = await $.ui.mount({ ...paneAt(12), surface })
+    expect(await keysStarting(ui, 'risk:')).toBe(3)
+    expect(await keysStarting(ui, 'open:')).toBe(3)
+    expect((await ui.find({ key: 'more:risk' }))?.text).toBe('Show 12 more')
+    expect((await ui.find({ key: 'more:open' }))?.text).toBe('Show 12 more')
+    // The link is plain, dim text, not a full button.
+    const link = await ui.find({ key: 'more:risk' })
+    expect(link?.props.plain).toBe(true)
+    expect(link?.props.dimColor).toBe(true)
     await ui.unmount()
   }
 })
 
-test('"+N more" shows the whole section and "Show less" folds it again', { options: OPTIONS }, async ($, on) => {
+test('"Show N more" shows the whole section; the others keep their first 3', { options: OPTIONS }, async ($, on) => {
   engine(on, () => MANY)
   await $.command.run(LEDGER_COMMAND)
 
   for (const surface of SURFACES) {
-    const ui = await $.ui.mount({ ...paneAt(20), surface })
-    expect(await keysStarting(ui, 'risk:')).toBeLessThan(15)
-
+    // A small viewport no longer starves the other sections: the body scrolls.
+    const ui = await $.ui.mount({ ...paneAt(12), surface })
     await ui.press({ key: 'more:risk' })
     expect(await keysStarting(ui, 'risk:')).toBe(15)
     expect(await ui.find({ key: 'more:risk' })).toBeUndefined()
     expect((await ui.find({ key: 'less:risk' }))?.text).toBe('Show less')
-    // The other sections give way but stay reachable through their own control.
+    expect(await keysStarting(ui, 'open:')).toBe(3)
     expect(await ui.find({ key: 'more:open' })).toBeDefined()
 
     // The expanded state is kept in $.state: a new drawing still shows it.
     await ui.unmount()
-    const again = await $.ui.mount({ ...paneAt(20), surface })
+    const again = await $.ui.mount({ ...paneAt(12), surface })
     expect(await keysStarting(again, 'risk:')).toBe(15)
 
     await again.press({ key: 'less:risk' })
     expect(await again.find({ key: 'less:risk' })).toBeUndefined()
     expect(await again.find({ key: 'more:risk' })).toBeDefined()
-    expect(countRows(await again.drawn())).toBeLessThanOrEqual(20)
+    expect(await keysStarting(again, 'risk:')).toBe(3)
     await again.unmount()
   }
 })
 
-test('item data is drawn dim and in the smaller size; titles are not', { options: OPTIONS }, async ($, on) => {
+type Part = { type?: string; props?: Record<string, unknown>; children?: unknown[] }
+/** Depth-first: the first element under `node` that `hit` accepts. */
+function findIn(node: unknown, hit: (p: Part) => boolean): Part | undefined {
+  if (typeof node !== 'object' || node === null) return undefined
+  const part = node as Part
+  if (hit(part)) return part
+  for (const child of part.children ?? []) {
+    const found = findIn(child, hit)
+    if (found) return found
+  }
+  return undefined
+}
+type Finder = { find: (q: { key: string }) => Promise<{ children: unknown[] } | undefined> }
+const rowOf = async (ui: Finder, key: string) => (await ui.find({ key: `row:${key}` }))
+/** The status mark sits outside the row's Button, so its color is drawn on desktop too. */
+const markColor = async (ui: Finder, key: string) =>
+  findIn(await rowOf(ui, key), p => p.type === 'Text' && JSON.stringify(p.children) === '["●"]')?.props?.color
+
+test('each row starts with a status mark colored by its state', { options: OPTIONS }, async ($, on) => {
   engine(on, () => SAMPLE)
   await $.command.run(LEDGER_COMMAND)
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...paneAt(40), surface })
-    const row = await ui.find({ key: 'risk:r1' })
-    const parts = (row?.children ?? []) as { type?: string; props?: Record<string, unknown>; children?: unknown[] }[]
-    const data = parts.find(p => p.props?.dimColor === true)
-    expect(data?.props?.size).toBe('footnote')
-    expect(JSON.stringify(data?.children)).toMatch(/unpushed, 4 not on remote/)
-    const name = parts.find(p => p.props?.dimColor !== true)
-    expect(name?.props?.size).toBe('footnote')
-    const heading = await ui.find({ type: 'Text', text: /^At risk, recent/ })
-    expect(heading?.props.size).toBeUndefined()
+    expect(await markColor(ui, 'risk:r1')).toBe('error')
+    expect(await markColor(ui, 'open:o1')).toBe('inactive')
+    await ui.press({ key: 'project:p2' })
+    expect(await markColor(ui, 'in:p2:st1')).toBe('ide')
+    await ui.press({ key: 'project:p2' })
+    await ui.unmount()
+  }
+})
+
+test('risk facts are compact indicators, not prose', { options: OPTIONS }, async ($, on) => {
+  engine(on, () =>
+    ledgerText(
+      [project('p1', { atRisk: true, git: { risk: 'modified', notOnRemote: 2 } })],
+      [
+        thread('r1', { effectiveState: 'at-risk', title: 'Unpushed one', git: { risk: 'unpushed', notOnRemote: 4 } }),
+        thread('r2', { effectiveState: 'at-risk', title: 'Untracked one', git: { risk: 'untracked', notOnRemote: 0 } }),
+      ],
+    ),
+  )
+  await $.command.run(LEDGER_COMMAND)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...paneAt(40), surface })
+    // unpushed: the name is drawn on the tinted background, no chip.
+    const r1 = await rowOf(ui, 'risk:r1')
+    // Desktop: the palette's at-risk tint with a dark name; terminal: the theme key.
+    expect(findIn(r1, p => p.type === 'Box' && p.props?.backgroundColor !== undefined)?.props?.backgroundColor).toBe(
+      surface === 'desktop' ? PALETTES.universal.unpushedBackground : 'diffRemovedDimmed',
+    )
+    if (surface === 'desktop') {
+      expect(findIn(r1, p => p.type === 'Text' && p.props?.color === PALETTES.universal.unpushedText)).toBeDefined()
+    }
+    expect(findIn(r1, p => p.type === 'Text' && /unpushed/.test(JSON.stringify(p.children)))).toBeUndefined()
+    // modified and untracked: one-letter badges.
+    const letter = (node: unknown, l: string) =>
+      findIn(node, p => p.type === 'Text' && JSON.stringify(p.children) === JSON.stringify([l]))
+    expect(letter(await rowOf(ui, 'riskproj:p1'), 'M')).toBeDefined()
+    expect(letter(await rowOf(ui, 'risk:r2'), 'U')).toBeDefined()
+    expect(findIn(await rowOf(ui, 'risk:r2'), p => p.type === 'Box' && p.props?.backgroundColor !== undefined)).toBeUndefined()
+    // Other warnings: one "!" whose text shows on hover (desktop) or inline (terminal).
+    expect(letter(r1, '!')).toBeDefined()
+    const warning = findIn(r1, p => p.type === 'Text' && /4 not on remote/.test(JSON.stringify(p.children)))
+    expect(warning).toBeDefined()
+    if (surface === 'desktop') {
+      const reveal = await ui.find({ key: 'warn:risk:r1' })
+      const hidden = findIn(reveal, p => p.type === 'Box' && p.props?.display === 'none')
+      expect(hidden).toBeDefined()
+      expect(JSON.stringify(hidden)).toMatch(/4 not on remote/)
+    } else {
+      expect(await ui.find({ key: 'warn:risk:r1' })).toBeUndefined()
+    }
+    await ui.unmount()
+  }
+})
+
+test('the per-project bar is drawn to scale on desktop and left out on the terminal', { options: OPTIONS }, async ($, on) => {
+  engine(on, () => SAMPLE)
+  await $.command.run(LEDGER_COMMAND)
+
+  const desktop = await $.ui.mount({ ...paneAt(40), surface: 'desktop' })
+  const bar = await desktop.find({ key: 'bar:p2' })
+  const segments = ((bar?.children[0] as Part | undefined)?.children ?? []) as Part[]
+  expect(segments.map(s => [s.props?.backgroundColor, s.props?.width])).toEqual([
+    [PALETTES.universal.fills.open, '50%'],
+    [PALETTES.universal.fills.goingCold, '50%'],
+  ])
+  // Hovering the bar reveals the counts per state.
+  const hidden = findIn(bar, p => p.type === 'Box' && p.props?.display === 'none')
+  expect(JSON.stringify(hidden)).toMatch(/1 open · 1 stale/)
+  // A legend under the label names the fills.
+  for (const word of ['at risk', 'going cold', 'open', 'done']) {
+    expect(await desktop.find({ type: 'Text', text: new RegExp(`^${word}$`) })).toBeDefined()
+  }
+  await desktop.unmount()
+
+  const terminal = await $.ui.mount({ ...paneAt(40), surface: 'terminal' })
+  expect(await terminal.find({ key: 'bar:p2' })).toBeUndefined()
+  expect(await terminal.find({ type: 'Text', text: /^going cold$/ })).toBeUndefined()
+  await terminal.unmount()
+})
+
+test('a project row leads with its chevron, colored by its worst state, which toggles it', { options: OPTIONS }, async ($, on) => {
+  engine(on, () => SAMPLE)
+  await $.command.run(LEDGER_COMMAND)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...paneAt(40), surface })
+    const chevron = await ui.find({ key: 'project:p1' })
+    expect(chevron?.text).toBe('▸')
+    expect((chevron?.children[0] as Part | undefined)?.props?.color).toBe('error')
+    // No status dot beside the chevron.
+    expect(await markColor(ui, 'project:p1')).toBeUndefined()
+    expect(await ui.find({ key: 'in:p1:r1' })).toBeUndefined()
+    await ui.press({ key: 'project:p1' })
+    expect((await ui.find({ key: 'project:p1' }))?.text).toBe('▾')
+    expect(await ui.find({ key: 'in:p1:r1' })).toBeDefined()
+    await ui.press({ key: 'project:p1' })
+    expect(await ui.find({ key: 'in:p1:r1' })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('repos without sessions sit behind one row; their risk stays in Projects at risk', { options: OPTIONS }, async ($, on) => {
+  engine(on, () =>
+    ledgerText(
+      [
+        project('p1'),
+        project('inv1', { atRisk: true, git: { risk: 'modified', notOnRemote: 0 } }),
+        project('inv2'),
+      ],
+      [thread('t1', { projectId: 'p1' })],
+    ),
+  )
+  await $.command.run(LEDGER_COMMAND)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...paneAt(40), surface })
+    expect(await ui.find({ type: 'Text', text: /^BY PROJECT · 1$/ })).toBeDefined()
+    expect((await ui.find({ key: 'row:project:no-sessions' }))?.text).toMatch(/2 repos without sessions/)
+    expect(await ui.find({ key: 'row:repo:inv1' })).toBeUndefined()
+    expect(await ui.find({ key: 'row:riskproj:inv1' })).toBeDefined()
+    await ui.press({ key: 'project:no-sessions' })
+    expect(await ui.find({ key: 'row:repo:inv1' })).toBeDefined()
+    expect(await ui.find({ key: 'row:repo:inv2' })).toBeDefined()
+    await ui.press({ key: 'project:no-sessions' })
+    await ui.unmount()
+  }
+})
+
+test('empty sections say what will appear there', { options: OPTIONS }, async ($, on) => {
+  engine(on, () => ledgerText([project('p1')], [thread('s1', { effectiveState: 'stale' })]))
+  await $.command.run(LEDGER_COMMAND)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...paneAt(40), surface })
+    expect(await ui.find({ type: 'Text', text: /^Nothing at risk in the last 30 days\.$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^No project at risk\.$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^No open threads\.$/ })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -352,4 +498,134 @@ test('without USERPROFILE, ~ resolves under HOME', { options: HOME_OPTIONS }, as
   // On Windows the engine resolves a rooted POSIX path onto the current drive.
   expect(reads).toHaveLength(1)
   expect(reads[0]?.replaceAll('\\', '/')).toMatch(/^([A-Za-z]:)?\/home\/jdoe\/wl\/out\/ledger\.json$/)
+})
+
+/** The engine's own rule for a Box size: a finite number of cells, or a whole percentage. */
+const ENGINE_PERCENT = /^\d{1,3}%$/
+const SIZE_PROPS = ['width', 'height', 'minWidth', 'minHeight'] as const
+function badSizes(node: unknown, out: string[] = []): string[] {
+  if (typeof node !== 'object' || node === null) return out
+  const el = node as Part
+  if (el.type === 'Box') {
+    for (const prop of SIZE_PROPS) {
+      const v = el.props?.[prop]
+      if (v === undefined) continue
+      const ok = typeof v === 'number' ? Number.isFinite(v) && v >= 0 : typeof v === 'string' && ENGINE_PERCENT.test(v)
+      if (!ok) out.push(`${prop}=${JSON.stringify(v)}`)
+    }
+  }
+  for (const child of el.children ?? []) badSizes(child, out)
+  return out
+}
+
+for (const [name, text] of [
+  [
+    'a project with no threads, one with a single state and one split in thirds',
+    ledgerText(
+      [project('empty', { atRisk: true }), project('one'), project('thirds')],
+      [
+        thread('a', { projectId: 'one', effectiveState: 'stale' }),
+        thread('b', { projectId: 'thirds', effectiveState: 'open' }),
+        thread('c', { projectId: 'thirds', effectiveState: 'stale' }),
+        thread('d', { projectId: 'thirds', effectiveState: 'done' }),
+      ],
+    ),
+  ],
+  ['an empty ledger', ledgerText([], [])],
+  ['the sample ledger', SAMPLE],
+] as const) {
+  test(`every Box size is one the engine takes: ${name}`, { options: OPTIONS }, async ($, on) => {
+    engine(on, () => text)
+    await $.command.run(LEDGER_COMMAND)
+    for (const surface of SURFACES) {
+      for (const [columns, rows] of [[60, 40], [8, 4]] as const) {
+        const pane = paneAt(rows)
+        const ui = await $.ui.mount({ ...pane, props: { ...pane.props, bodyColumns: columns }, surface })
+        // Expand every project, so bars and thread rows are drawn too.
+        for (const b of await ui.findAll({ type: 'Button' })) {
+          if (b.key?.startsWith('project:')) await ui.press({ key: b.key })
+        }
+        expect(badSizes(await ui.drawn())).toEqual([])
+        await ui.unmount()
+      }
+    }
+  })
+}
+
+/** Every Text whose weight is heavier than regular, or that is drawn bold. */
+function heavyTexts(node: unknown, out: string[] = []): string[] {
+  if (typeof node !== 'object' || node === null) return out
+  const el = node as Part
+  if (el.type === 'Text') {
+    const w = el.props?.weight
+    if (el.props?.bold === true || w === 'bold' || w === 'semibold' || w === 'medium') {
+      out.push(JSON.stringify(el.children))
+    }
+  }
+  for (const child of el.children ?? []) heavyTexts(child, out)
+  return out
+}
+
+/** Every color a Text or Box in the tree carries. */
+function colorsIn(node: unknown, out = new Set<unknown>()): Set<unknown> {
+  if (typeof node !== 'object' || node === null) return out
+  const el = node as Part
+  for (const prop of ['color', 'backgroundColor', 'borderColor']) {
+    if (el.props?.[prop] !== undefined) out.add(el.props[prop])
+  }
+  for (const child of el.children ?? []) colorsIn(child, out)
+  return out
+}
+
+test('no bold and no amber anywhere: hierarchy by size and dim only', { options: OPTIONS }, async ($, on) => {
+  engine(on, () =>
+    ledgerText(
+      [project('p1', { atRisk: true, git: { risk: 'modified', notOnRemote: 3 } }), project('p2')],
+      [
+        thread('r1', { effectiveState: 'at-risk', git: { risk: 'unpushed', notOnRemote: 4 }, lead: 's-1', sessions: ['s-1'] }),
+        thread('c1', { effectiveState: 'open', daysIdle: 20, projectId: 'p2' }),
+        thread('s1', { effectiveState: 'stale', daysIdle: 40, projectId: 'p2' }),
+      ],
+    ),
+  )
+  await $.command.run(LEDGER_COMMAND)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...paneAt(40), surface })
+    await ui.press({ key: 'project:p2' })
+    const list = await ui.drawn()
+    expect(heavyTexts(list)).toEqual([])
+    expect(colorsIn(list).has('warning')).toBe(false)
+    // Raw colors come only from the palette, and only on desktop.
+    expect([...colorsIn(list)].filter(c => typeof c === 'string' && c.startsWith('#') && !PALETTE_VALUES.has(c))).toEqual([])
+    if (surface === 'terminal') expect([...colorsIn(list)].some(c => String(c).startsWith('#'))).toBe(false)
+    // A thread going cold is marked blue.
+    expect(await markColor(ui, 'open:c1')).toBe('ide')
+    await ui.press({ key: 'risk:r1' })
+    const detail = await ui.drawn()
+    expect(heavyTexts(detail)).toEqual([])
+    expect(colorsIn(detail).has('warning')).toBe(false)
+    expect([...colorsIn(detail)].filter(c => typeof c === 'string' && c.startsWith('#') && !PALETTE_VALUES.has(c))).toEqual([])
+    await ui.press({ key: 'back' })
+    await ui.press({ key: 'project:p2' })
+    await ui.unmount()
+  }
+})
+
+const PALETTE_VALUES = new Set(
+  Object.values(PALETTES).flatMap(p => [...Object.values(p.fills), p.unpushedBackground, p.unpushedText]),
+)
+
+test('colorScheme picks the fills: dark draws the bar and legend from the dark palette', { options: { ...OPTIONS, colorScheme: 'dark' } }, async ($, on) => {
+  engine(on, () => SAMPLE)
+  await $.command.run(LEDGER_COMMAND)
+
+  const ui = await $.ui.mount({ ...paneAt(40), surface: 'desktop' })
+  const bar = await ui.find({ key: 'bar:p2' })
+  const segments = ((bar?.children[0] as Part | undefined)?.children ?? []) as Part[]
+  expect(segments.map(s => s.props?.backgroundColor)).toEqual([PALETTES.dark.fills.open, PALETTES.dark.fills.goingCold])
+  const colors = colorsIn(await ui.drawn())
+  for (const fill of [PALETTES.dark.fills.atRisk, PALETTES.dark.fills.done]) expect(colors.has(fill)).toBe(true)
+  expect(colors.has(PALETTES.universal.fills.open)).toBe(false)
+  await ui.unmount()
 })

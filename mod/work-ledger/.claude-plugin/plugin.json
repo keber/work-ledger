@@ -33,6 +33,17 @@
       "title": "Pieces inbox",
       "description": "Curation inbox folder; the newest YYYY-MM-DD folder in it is shown.",
       "default": "~/Proyectos/work-ledger/out/pieces/inbox"
+    },
+    "colorScheme": {
+      "type": "string",
+      "title": "Color scheme",
+      "description": "Pick light or dark to match the app theme; auto uses colors that work on both.",
+      "options": [
+        "auto",
+        "light",
+        "dark"
+      ],
+      "default": "auto"
     }
   },
   "license": "MIT"

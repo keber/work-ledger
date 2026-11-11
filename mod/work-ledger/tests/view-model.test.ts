@@ -2,7 +2,6 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import type { LedgerView } from '../types'
 import {
-  allocateRows,
   clip,
   expandHome,
   fitList,
@@ -10,7 +9,6 @@ import {
   formatCounts,
   lastLine,
   parseLedger,
-  planSections,
   splitClip,
   projectRows,
   readError,
@@ -178,23 +176,6 @@ describe('helpers', () => {
     expect(formatAge(at, base + 3 * 3_600_000)).toBe('3 h ago')
     expect(formatAge(at, base + 72 * 3_600_000)).toBe('3 d ago')
     expect(formatAge('garbage', base)).toBe('at an unknown time')
-  })
-
-  test('allocateRows gives each section two rows first, then fills in order', () => {
-    expect(allocateRows(20, [3, 4, 5])).toEqual([3, 4, 5])
-    expect(allocateRows(8, [5, 5, 5])).toEqual([4, 2, 2])
-    expect(allocateRows(3, [5, 0, 5])).toEqual([2, 0, 1])
-    expect(allocateRows(-4, [5])).toEqual([0])
-  })
-
-  test('planSections: an expanded section takes all its rows plus Show less', () => {
-    const s = (count: number, isExpanded = false) => ({ count, isExpanded })
-    expect(planSections(20, [s(3), s(4), s(5)])).toEqual([3, 4, 5])
-    expect(planSections(6, [s(15), s(1), s(15), s(1)])).toEqual([2, 1, 2, 1])
-    // Expanded first; the others keep one row each for their "+N more".
-    expect(planSections(6, [s(15, true), s(1), s(15), s(1)])).toEqual([16, 1, 1, 1])
-    expect(planSections(20, [s(3, true), s(10), s(10), s(0)])).toEqual([4, 10, 6, 0])
-    expect(planSections(0, [s(5), s(0), s(5)])).toEqual([1, 0, 1])
   })
 
   test('splitClip fits a name and its data on one line, cutting the name first', () => {

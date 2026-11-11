@@ -43,7 +43,15 @@ export type LedgerProjectView = {
 
 export type LedgerView = {
   generatedAt: string
-  counts: { projectsAtRisk: number; threadsAtRisk: number; open: number }
+  counts: {
+    projectsAtRisk: number
+    threadsAtRisk: number
+    open: number
+    /** Open or active threads idle 14 days or more. */
+    goingCold: number
+    /** Commits on no remote, feature branches and main worktrees together. */
+    unbacked: number
+  }
   /** Thread ids: effective state at-risk and recency recent, newest first. */
   atRiskRecent: string[]
   /** Project ids with atRisk, in ledger order. */

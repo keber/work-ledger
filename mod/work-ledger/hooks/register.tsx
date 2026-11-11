@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, PluginOptions, Register, RenderChildren } from 'claude-code'
+import type { EngineInterface, PluginOptions, Register, RenderChildren, ThemeKey } from 'claude-code'
 
 import type {
   LedgerLoad,
@@ -23,17 +23,30 @@ import {
 } from './pieces'
 import type { FrontMatterResult } from './pieces'
 import {
+  ACCENT,
+  CARD_BORDER,
+  BADGE,
+  COLD,
+  ROW_HOVER,
+  STATUS_MARK,
+  UNPUSHED_BG,
+  cells,
+  percent,
+  riskFacts,
+  riskIndicators,
+  stackSegments,
+  statusKey,
+} from './style'
+import type { Indicators } from './style'
+import { legendOf, paletteFor, stateFill } from './palette'
+import {
   clip,
   expandHome,
   fitList,
   formatAge,
-  formatCounts,
   formatDays,
-  formatRisk,
   lastLine,
   parseLedger,
-  planSections,
-  projectRows,
   readError,
   splitClip,
 } from './view-model'
@@ -53,12 +66,19 @@ const DEFAULTS = {
 }
 const PIECE_TIMEOUT_MS = 120_000
 const STALE_PIECE_MS = PIECE_TIMEOUT_MS + 60_000
+/** Cells across a per-project stacked bar (desktop only). */
+const BAR_WIDTH = 12
+/** Items a collapsed section shows before its "Show N more" link. */
+const COLLAPSED_ITEMS = 3
+/** The expanded-ids entry of the "repos without sessions" group. */
+const NO_SESSIONS = '(no-sessions)'
+const NO_INDICATORS: Indicators = { isUnpushed: false, badges: [], warnings: [] }
 const PUBLIC_WARNING = 'Check it for internal details before approving.'
 
 // Change a shape tag when the stored value's fields change: an older value is
 // then read as the initial one instead of being misread.
 const ledger = atom({ plugin: 'work-ledger', key: 'ledger' } as const, { status: 'unloaded' } as LedgerLoad, {
-  shape: 'ledger-1',
+  shape: 'ledger-2',
 })
 const selected = atom({ plugin: 'work-ledger', key: 'selected' } as const, null as string | null, {
   shape: 'selected-1',
@@ -295,6 +315,8 @@ export const register: Register = (on, options) => {
     pythonCommand: option(options, 'pythonCommand'),
     piecesDir: option(options, 'piecesDir'),
   }
+  // Fills only; text keeps theme keys. `auto` is the universal palette.
+  const { palette } = paletteFor(typeof options.colorScheme === 'string' ? options.colorScheme : 'auto')
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'ledger', description: 'Show the work ledger pane' })
@@ -328,9 +350,11 @@ export const register: Register = (on, options) => {
     const cols = Math.max(20, e.props.bodyColumns - 1)
     const rows = Math.max(10, e.props.scroll.bodyRows || (e.viewport?.rows ?? 30) - 4)
     const isRunning = refreshState.isRunning && now - refreshState.startedAt < STALE_RUN_MS
+    // The terminal draws one text size and no bars; everything else degrades in place.
+    const isTerminal = e.surface === 'terminal'
 
     const refreshButton = (
-      <Button key="refresh" variant="primary" onPress={() => (isRunning ? undefined : startRefresh($, cfg))}>
+      <Button key="refresh" variant="secondary" onPress={() => (isRunning ? undefined : startRefresh($, cfg))}>
         {isRunning ? 'Refreshing…' : 'Refresh'}
       </Button>
     )
@@ -339,13 +363,26 @@ export const register: Register = (on, options) => {
       update($, expanded, list =>
         list.includes(projectId) ? list.filter(id => id !== projectId) : [...list, projectId],
       )
-    const more = (n: number) => (n > 0 ? [<Text dimColor>{`+${n} more`}</Text>] : [])
+
+    // Type scale, three sizes: caption for section labels, body for titles,
+    // footnote for metadata. Every number is tabular.
+    const label = (text: string) => (
+      <Text size="caption" dimColor tabular>
+        {clip(text.toUpperCase(), cols)}
+      </Text>
+    )
+    const note = (text: string) => (
+      <Text size="caption" dimColor>
+        {text}
+      </Text>
+    )
+    const more = (n: number) => (n > 0 ? [note(`${n} more`)] : [])
 
     if (load.status !== 'ok') {
       const message =
         load.status === 'unloaded' ? 'The ledger is not loaded yet.' : load.error.message
       return (
-        <Box flexDirection="column">
+        <Box flexDirection="column" rowGap="xs">
           <Text color={load.status === 'error' ? 'error' : undefined}>{message}</Text>
           <Box flexDirection="row" gap={1}>
             {refreshButton}
@@ -371,169 +408,443 @@ export const register: Register = (on, options) => {
       return renderDetail(thread)
     }
 
-    // List view. Rows on the terminal: 2 for the header, then per section one
-    // for its top margin and one for its heading; the rest is shared. A section
-    // the person expanded takes all its rows and the pane body scrolls.
+    /**
+     * One row anatomy everywhere: marker · name (one line, takes the room) ·
+     * fixed-width indicators and days, then the row's press target. The row
+     * lights on hover.
+     *
+     * Only a Button is pressable, and a desktop draws a Button's contents in its
+     * own label style: it drops `color` (the marks turned black) and `size` (the
+     * names stayed large). So everything styled sits outside the Button, and the
+     * Button is a small target: "›" at the end of a thread row, the chevron at
+     * the start of a project row.
+     */
+    type Row = {
+      key: string
+      /** Status mark color; absent draws no mark (project rows lead with the chevron). */
+      color?: ThemeKey
+      name: string
+      nameColor?: ThemeKey
+      isNameDim?: boolean
+      indicators?: Indicators
+      meta: string[]
+      onPress?: () => unknown
+      /** A project row: its chevron is the press target and leads the row. */
+      chevron?: { glyph: string; color: ThemeKey }
+      indent?: boolean
+      extra?: RenderChildren
+      extraWidth?: number
+    }
+    function row(r: Row) {
+      const ind = r.indicators ?? NO_INDICATORS
+      const warning = ind.warnings.join(' · ')
+      // No hover on the terminal: the "!" text is drawn inline there.
+      const isInline = isTerminal && warning !== ''
+      const rightWidth =
+        r.meta.reduce((sum, m) => sum + m.length + 1, 0) +
+        ind.badges.length * 2 +
+        (warning ? 2 : 0) +
+        (isInline ? warning.length + 1 : 0) +
+        (r.extraWidth ?? 0) +
+        (r.onPress && !r.chevron ? 2 : 0)
+      const room = Math.max(12, cols - rightWidth - 3 - (r.indent ? 2 : 0))
+      const name = (
+        <Text
+          size="footnote"
+          color={ind.isUnpushed && !isTerminal ? palette.unpushedText : r.nameColor}
+          dimColor={r.isNameDim}
+        >
+          {clip(r.name, room)}
+        </Text>
+      )
+      const lead = r.chevron
+        ? [
+            r.onPress ? (
+              <Button key={r.key} plain onPress={r.onPress}>
+                <Text color={r.chevron.color}>{r.chevron.glyph}</Text>
+              </Button>
+            ) : (
+              <Text color={r.chevron.color}>{r.chevron.glyph}</Text>
+            ),
+          ]
+        : r.color
+          ? [
+              <Text size="footnote" color={r.color}>
+                {STATUS_MARK}
+              </Text>,
+            ]
+          : []
+      return (
+        <Box
+          key={`row:${r.key}`}
+          flexDirection="row"
+          justifyContent="space-between"
+          alignItems="center"
+          gap={1}
+          paddingLeft={r.indent ? 2 : 0}
+          hover={{ backgroundColor: ROW_HOVER }}
+        >
+          <Box flexDirection="row" gap={1} flexGrow={1} flexShrink={1} alignItems="center">
+            {lead}
+            <Box
+              key={r.onPress || r.chevron ? undefined : r.key}
+              flexDirection="row"
+              flexGrow={1}
+              flexShrink={1}
+              backgroundColor={ind.isUnpushed ? (isTerminal ? UNPUSHED_BG : palette.unpushedBackground) : undefined}
+            >
+              {name}
+            </Box>
+          </Box>
+          <Box flexDirection="row" gap={1} flexShrink={0} alignItems="center">
+            {r.extra ?? []}
+            {ind.badges.map(b => (
+              <Text size="caption" color={BADGE}>
+                {b.letter}
+              </Text>
+            ))}
+            {warning === ''
+              ? []
+              : isInline
+                ? [
+                    <Text size="caption" dimColor>
+                      !
+                    </Text>,
+                    <Text size="caption" dimColor tabular>
+                      {warning}
+                    </Text>,
+                  ]
+                : [reveal(`warn:${r.key}`, <Text size="caption" dimColor>!</Text>, warning)]}
+            {r.meta.map(m => (
+              <Text size="caption" dimColor tabular>
+                {m}
+              </Text>
+            ))}
+            {r.onPress && !r.chevron
+              ? [
+                  <Button key={r.key} plain dimColor onPress={r.onPress}>
+                    ›
+                  </Button>,
+                ]
+              : []}
+          </Box>
+        </Box>
+      )
+    }
+
+    /**
+     * The API has no tooltip: a keyed Box is a hover scope, and a hidden
+     * absolute Box in it is revealed while the pointer is over the scope.
+     */
+    function reveal(key: string, target: RenderChildren, text: string) {
+      return (
+        <Box key={key} flexDirection="row">
+          {target}
+          <Box position="absolute" top={1} right={0} display="none" hover={{ display: 'flex' }}>
+            <Text size="caption" inverse tabular>{` ${text} `}</Text>
+          </Box>
+        </Box>
+      )
+    }
+
+    // List view. The pane body scrolls, so nothing is fitted to the viewport:
+    // a collapsed section shows its first few items and a "Show N more" link
+    // on its label row; an expanded one shows them all.
     const shownAll = await read($, showAll)
-    const byProject = projectRows(view, expandedIds)
     const isAll = (id: LedgerSection) => shownAll.includes(id)
-    // The pieces section is drawn only when the inbox has something to say:
-    // proposed pieces, or an index it could not read.
-    const hasPieces = toReview.length > 0 || inbox.status === 'error'
-    const pieceItems = inbox.status === 'error' ? [] : toReview
-    const [pieceRows = 0, riskRows = 0, projRows = 0, openRows = 0, allRows = 0] = planSections(
-      // Its margin and heading, plus up to two rows for an error note.
-      rows - 10 - (hasPieces ? 2 + (inbox.status === 'error' ? 2 : 0) : 0),
-      [
-      { count: hasPieces ? pieceItems.length : 0, isExpanded: hasPieces && isAll('pieces') },
-      { count: view.atRiskRecent.length, isExpanded: isAll('risk') },
-      { count: view.projectsAtRisk.length, isExpanded: isAll('projects') },
-      { count: view.open.length, isExpanded: isAll('open') },
-      { count: byProject.length, isExpanded: isAll('all') },
-      ],
-    )
+    const firstOf = <T,>(id: LedgerSection, items: readonly T[]) => (isAll(id) ? [...items] : items.slice(0, COLLAPSED_ITEMS))
+    const hasPieces = inbox.status !== 'none'
+    const pieceItems = inbox.status === 'ok' ? toReview : []
 
     const setAll = (id: LedgerSection, isShown: boolean) => () =>
       update($, showAll, list => (isShown ? [...list.filter(s => s !== id), id] : list.filter(s => s !== id)))
-    const heading = (text: string) => <Text bold>{clip(text, cols)}</Text>
-    const item = (key: string, onPress: () => unknown, name: string, data: string) => {
-      const [n, d] = splitClip(name, data, cols)
-      return (
-        <Button key={key} plain onPress={onPress}>
-          <Text size="footnote">{n}</Text>
-          <Text size="footnote" dimColor>
-            {d}
-          </Text>
-        </Button>
-      )
-    }
-    const threadItem = (prefix: string, t: LedgerThreadView, name: string, data: string) =>
-      item(`${prefix}:${t.id}`, select(t.id), name, data)
+    const link = (key: string, text: string, onPress: () => unknown) => (
+      <Button key={key} plain dimColor onPress={onPress}>
+        {text}
+      </Button>
+    )
 
-    function section<T>(
-      id: LedgerSection,
-      title: string,
-      items: readonly T[],
-      rowsFor: number,
-      draw: (x: T) => RenderChildren,
-      note: string | null = null,
-    ) {
-      const fit = isAll(id) ? { shown: [...items], more: 0 } : fitList(items, rowsFor)
-      return (
+    function section(s: {
+      id: LedgerSection
+      title: string
+      /** Items the section holds; "Show N more" counts past COLLAPSED_ITEMS. */
+      count: number
+      body: RenderChildren[]
+      empty: string
+      intro?: RenderChildren
+      error?: string | null
+      isCard?: boolean
+    }) {
+      const hidden = isAll(s.id) ? 0 : Math.max(0, s.count - COLLAPSED_ITEMS)
+      // "Show N more" and "Show less" sit on the label row: no row of their own.
+      const toggle =
+        hidden > 0
+          ? [link(`more:${s.id}`, `Show ${hidden} more`, setAll(s.id, true))]
+          : isAll(s.id) && s.count > COLLAPSED_ITEMS
+            ? [link(`less:${s.id}`, 'Show less', setAll(s.id, false))]
+            : []
+      const body = [
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+          {label(s.title)}
+          {toggle}
+        </Box>,
+        ...(s.intro ? [s.intro] : []),
+        ...(s.error ? [<Text color="error">{clip(s.error, cols * 2)}</Text>] : []),
+        ...(!s.error && s.count === 0 ? [note(s.empty)] : []),
+        ...s.body,
+      ]
+      // Cards only where they mean something: the pieces section and the detail views.
+      return s.isCard ? (
+        <Box
+          key={`card:${s.id}`}
+          flexDirection="column"
+          marginTop="md"
+          rowGap="xs"
+          borderStyle="round"
+          borderColor={CARD_BORDER}
+          paddingX={1}
+        >
+          {body}
+        </Box>
+      ) : (
         <Box flexDirection="column" marginTop="md" rowGap="xs">
-          {heading(title)}
-          {note === null ? [] : [<Text color="error">{clip(note, cols * 2)}</Text>]}
-          {fit.shown.map(draw)}
-          {fit.more > 0
-            ? [
-                <Button key={`more:${id}`} plain dimColor onPress={setAll(id, true)}>
-                  {`+${fit.more} more`}
-                </Button>,
-              ]
-            : []}
-          {isAll(id)
-            ? [
-                <Button key={`less:${id}`} plain dimColor onPress={setAll(id, false)}>
-                  Show less
-                </Button>,
-              ]
-            : []}
+          {body}
         </Box>
       )
     }
+
+    const stat = (n: number, text: string, tone?: ThemeKey) => (
+      <Text>
+        <Text size="footnote" tabular color={n > 0 ? tone : undefined}>
+          {String(n)}
+        </Text>
+        <Text size="caption" dimColor>{` ${text}`}</Text>
+      </Text>
+    )
+    const days = (d: number | null): string => formatDays(d)
     const { counts } = view
+
+    // By project: projects with sessions first; inventory-only repos (no
+    // threads) behind one row. Their risk stays in "Projects at risk".
+    const withThreads = view.projects.filter(id => view.projectsById[id]!.threadIds.length > 0)
+    const withoutThreads = view.projects.filter(id => view.projectsById[id]!.threadIds.length === 0)
+    const isNoSessionsOpen = expandedIds.includes(NO_SESSIONS)
+
+    /** A repo the inventory knows but no session touched: listed, dim, not expandable. */
+    function repoRow(id: string) {
+      const p = view.projectsById[id]!
+      return row({
+        key: `repo:${p.id}`,
+        name: p.name,
+        isNameDim: true,
+        indicators: riskIndicators(p.risk, p.notOnRemote),
+        meta: [days(p.daysIdle)],
+        indent: true,
+      })
+    }
+
+    function projectRow(id: string) {
+      const p = view.projectsById[id]!
+      const isOpen = expandedIds.includes(p.id)
+      const segments = stackSegments(p.counts)
+      const worst = p.atRisk ? 'error' : (segments[0] ? statusKey(segments[0].state, null) : 'inactive')
+      const summary = segments.map(s => `${s.count} ${s.state}`).join(' · ')
+      const bar =
+        isTerminal || segments.length === 0
+          ? null
+          : reveal(
+              `bar:${p.id}`,
+              <Box flexDirection="row" width={cells(BAR_WIDTH)} height={1}>
+                {segments
+                  .filter(s => s.percent > 0)
+                  .map(s => (
+                    <Box width={percent(s.percent)} height={1} backgroundColor={palette.fills[stateFill(s.state)]} />
+                  ))}
+              </Box>,
+              summary,
+            )
+      const head = row({
+        key: `project:${p.id}`,
+        name: p.name,
+        chevron: { glyph: isOpen ? '▾' : '▸', color: worst },
+        meta: [`${p.threadIds.length}`],
+        onPress: toggle(p.id),
+        extra: bar,
+        extraWidth: bar === null ? 0 : BAR_WIDTH + 1,
+      })
+      if (!isOpen) return [head]
+      return [
+        head,
+        ...p.threadIds.map(tid => {
+          const t = view.threads[tid]!
+          return row({
+            key: `in:${p.id}:${t.id}`,
+            color: statusKey(t.effectiveState, t.daysIdle),
+            name: t.title,
+            indicators: riskIndicators(t.risk, t.notOnRemote),
+            meta: [t.effectiveState, days(t.daysIdle)],
+            onPress: select(t.id),
+            indent: true,
+          })
+        }),
+      ]
+    }
+
+    const legend = isTerminal ? null : (
+      <Box flexDirection="row" flexWrap="wrap" columnGap="sm">
+        {legendOf(palette).map(l => (
+          <Box flexDirection="row" gap={1} alignItems="center">
+            <Text backgroundColor={l.fill}>{'  '}</Text>
+            <Text size="caption" dimColor>
+              {l.label}
+            </Text>
+          </Box>
+        ))}
+      </Box>
+    )
 
     return (
       <Box flexDirection="column">
-        <Box flexDirection="row" justifyContent="space-between">
-          <Text dimColor>{clip(`Updated ${formatAge(view.generatedAt, now)}`, cols - 14)}</Text>
-          {refreshButton}
+        <Box flexDirection="row" flexWrap="wrap" columnGap="sm" justifyContent="space-between">
+          {stat(view.atRiskRecent.length, 'at risk', 'error')}
+          {stat(counts.goingCold, 'going cold', COLD)}
+          {stat(counts.unbacked, 'no backup')}
+          {stat(toReview.length, 'to review')}
         </Box>
-        <Text>
-          {clip(
-            `${counts.projectsAtRisk} projects at risk · ${counts.threadsAtRisk} threads at risk · ${counts.open} open`,
-            cols,
-          )}
-        </Text>
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+          <Text size="caption" dimColor>
+            {clip(`Updated ${formatAge(view.generatedAt, now)}`, cols - 14)}
+          </Text>
+          <Button key="refresh" plain dimColor onPress={() => (isRunning ? undefined : startRefresh($, cfg))}>
+            {isRunning ? 'Refreshing…' : 'Refresh'}
+          </Button>
+        </Box>
 
         {hasPieces
           ? [
-              section(
-                'pieces',
-                `Pieces to review (${pieceItems.length})`,
-                pieceItems,
-                pieceRows,
-                p =>
-                  item(
-                    `piece:${p.id}`,
-                    selectPiece(p.id),
-                    `${p.audience} · ${p.title}`,
-                    ` · ${formatRelevance(p.relevance)}`,
-                  ),
-                inbox.status === 'error' ? inbox.message : null,
-              ),
+              section({
+                id: 'pieces',
+                title: `Pieces to review · ${pieceItems.length}`,
+                count: pieceItems.length,
+                empty: 'No pieces to review. New drafts arrive Thursday.',
+                error: inbox.status === 'error' ? inbox.message : null,
+                isCard: true,
+                body: firstOf('pieces', pieceItems).map(p =>
+                  row({
+                    key: `piece:${p.id}`,
+                    color: 'inactive',
+                    name: `${p.audience} · ${p.title}`,
+                    meta: [formatRelevance(p.relevance)],
+                    onPress: selectPiece(p.id),
+                  }),
+                ),
+              }),
             ]
           : []}
 
-        {section('risk', `At risk, recent (${view.atRiskRecent.length})`, view.atRiskRecent, riskRows, id => {
-          const t = view.threads[id]!
-          return threadItem(
-            'risk',
-            t,
-            `${t.projectName} · ${t.title}`,
-            ` · ${formatDays(t.daysIdle)} · ${formatRisk(t.risk, t.notOnRemote)}`,
-          )
-        })}
-
-        {section('projects', `Projects at risk (${view.projectsAtRisk.length})`, view.projectsAtRisk, projRows, id => {
-          const p = view.projectsById[id]!
-          const older = p.oldAtRiskCount ? ` · ${p.oldAtRiskCount} older at risk` : ''
-          const [n, d] = splitClip(
-            p.name,
-            ` · ${formatRisk(p.risk, p.notOnRemote)} · ${formatDays(p.daysIdle)}${older}`,
-            cols,
-          )
-          return (
-            <Text size="footnote">
-              {n}
-              <Text dimColor>{d}</Text>
-            </Text>
-          )
-        })}
-
-        {section(
-          'open',
-          view.counts.open > view.open.length
-            ? `Open (${view.open.length} of ${view.counts.open})`
-            : `Open (${view.counts.open})`,
-          view.open,
-          openRows,
-          id => {
+        {section({
+          id: 'risk',
+          title: `At risk, recent · ${view.atRiskRecent.length}`,
+          count: view.atRiskRecent.length,
+          empty: 'Nothing at risk in the last 30 days.',
+          body: firstOf('risk', view.atRiskRecent).map(id => {
             const t = view.threads[id]!
-            return threadItem('open', t, `${t.projectName} · ${t.title}`, ` · ${formatDays(t.daysIdle)}`)
-          },
-        )}
+            return row({
+              key: `risk:${t.id}`,
+              color: statusKey(t.effectiveState, t.daysIdle),
+              name: `${t.projectName} · ${t.title}`,
+              indicators: riskIndicators(t.risk, t.notOnRemote),
+              meta: [days(t.daysIdle)],
+              onPress: select(t.id),
+            })
+          }),
+        })}
 
-        {section('all', `By project (${view.projects.length})`, byProject, allRows, row => {
-          if (row.kind === 'project') {
-            const p = view.projectsById[row.projectId]!
-            return item(
-              `project:${p.id}`,
-              toggle(p.id),
-              `${row.isExpanded ? '▾' : '▸'} ${p.name}`,
-              ` · ${formatCounts(p.counts)}`,
-            )
-          }
-          const t = view.threads[row.threadId]!
-          return threadItem(
-            `in:${row.projectId}`,
-            t,
-            `   ${t.title}`,
-            ` · ${t.effectiveState} · ${formatDays(t.daysIdle)}`,
-          )
+        {section({
+          id: 'projects',
+          title: `Projects at risk · ${view.projectsAtRisk.length}`,
+          count: view.projectsAtRisk.length,
+          empty: 'No project at risk.',
+          body: firstOf('projects', view.projectsAtRisk).map(id => {
+            const p = view.projectsById[id]!
+            return row({
+              key: `riskproj:${p.id}`,
+              color: 'error',
+              name: p.name,
+              indicators: riskIndicators(
+                p.risk,
+                p.notOnRemote,
+                p.oldAtRiskCount ? [`${p.oldAtRiskCount} older at risk`] : [],
+              ),
+              meta: [days(p.daysIdle)],
+            })
+          }),
+        })}
+
+        {section({
+          id: 'open',
+          title:
+            counts.open > view.open.length
+              ? `Open · ${view.open.length} of ${counts.open}`
+              : `Open · ${counts.open}`,
+          count: view.open.length,
+          empty: 'No open threads.',
+          body: firstOf('open', view.open).map(id => {
+            const t = view.threads[id]!
+            return row({
+              key: `open:${t.id}`,
+              color: statusKey(t.effectiveState, t.daysIdle),
+              name: `${t.projectName} · ${t.title}`,
+              indicators: riskIndicators(t.risk, t.notOnRemote),
+              meta: [days(t.daysIdle)],
+              onPress: select(t.id),
+            })
+          }),
+        })}
+
+        {section({
+          id: 'all',
+          title: `By project · ${withThreads.length}`,
+          count: withThreads.length,
+          empty: 'No projects with sessions yet. Refresh to build the ledger.',
+          intro: withThreads.length > 0 ? legend : null,
+          body: [
+            ...firstOf('all', withThreads).flatMap(projectRow),
+            ...(withoutThreads.length === 0
+              ? []
+              : [
+                  row({
+                    key: 'project:no-sessions',
+                    name: `${withoutThreads.length} repos without sessions`,
+                    isNameDim: true,
+                    chevron: { glyph: isNoSessionsOpen ? '▾' : '▸', color: 'inactive' },
+                    meta: [],
+                    onPress: toggle(NO_SESSIONS),
+                  }),
+                  ...(isNoSessionsOpen ? withoutThreads.map(repoRow) : []),
+                ]),
+          ],
         })}
       </Box>
     )
+
+    /** A detail view: the one place besides the pieces section drawn as a card. */
+    function card(children: RenderChildren) {
+      return (
+        <Box flexDirection="column" rowGap="xs" borderStyle="round" borderColor={CARD_BORDER} paddingX={1}>
+          {children}
+        </Box>
+      )
+    }
+
+    function field(name: string, value: string | null, width: number) {
+      return (
+        <Box flexDirection="column">
+          {note(name)}
+          <Text size="footnote">{value ? clip(value, width) : '—'}</Text>
+        </Box>
+      )
+    }
 
     function renderPiece(p: PieceView) {
       const isBusy = action.id !== null && Date.now() - action.startedAt < STALE_PIECE_MS
@@ -542,47 +853,37 @@ export const register: Register = (on, options) => {
       const ledgerTitles = Object.fromEntries(Object.values(view.threads).map(t => [t.id, t.title]))
       const sources = fitList(sourceTitles(p, ledgerTitles), 5)
       const textWidth = 3 * Math.max(10, cols - 8)
-      const field = (label: string, value: string | null) => (
-        <Text>
-          <Text dimColor>{`${label}: `}</Text>
-          {value ? clip(value, textWidth) : '—'}
-        </Text>
-      )
       const press = (kind: PieceActionKind) => () =>
         isBusy ? undefined : startPieceAction($, cfg, p.id, kind)
 
-      return (
-        <Box flexDirection="column" rowGap="xs">
-          <Box flexDirection="row" gap={1}>
-            <Button key="back" role="dismiss" onPress={selectPiece(null)}>
-              Back
-            </Button>
-          </Box>
-          <Text bold>{clip(p.title, cols * 2)}</Text>
-          <Text dimColor>
-            {clip(`${p.audience} · ${p.visibility} · relevance ${formatRelevance(p.relevance)} · ${p.id}`, cols)}
-          </Text>
-          {p.visibility === 'external' || p.audience === 'public'
-            ? [<Text color="warning">{PUBLIC_WARNING}</Text>]
-            : []}
-          {p.problem ? [<Text color="error">{clip(p.problem, cols * 2)}</Text>] : []}
-          {field('Summary', p.summary)}
-          {field('Rationale', p.rationale)}
-          <Text dimColor>{`Source threads (${p.sourceThreadIds.length})`}</Text>
-          {sources.shown.map(title => (
-            <Text size="footnote">{clip(`  ${title}`, cols)}</Text>
-          ))}
-          {more(sources.more)}
-          <Box flexDirection="row" gap={1}>
-            <Button key="approve" variant="primary" onPress={press('approve')}>
-              {busyLabel('approve', 'Approve', 'Approving…')}
-            </Button>
-            <Button key="discard" onPress={press('discard')}>
-              {busyLabel('discard', 'Discard', 'Discarding…')}
-            </Button>
-          </Box>
-        </Box>
-      )
+      return card([
+        <Box flexDirection="row">
+          <Button key="back" role="dismiss" onPress={selectPiece(null)}>
+            Back
+          </Button>
+        </Box>,
+        <Text size="body">{clip(p.title, cols * 2)}</Text>,
+        <Text size="caption" dimColor tabular>
+          {clip(`${p.audience} · ${p.visibility} · relevance ${formatRelevance(p.relevance)} · ${p.id}`, cols)}
+        </Text>,
+        ...(p.visibility === 'external' || p.audience === 'public'
+          ? [<Text color="error">{PUBLIC_WARNING}</Text>]
+          : []),
+        ...(p.problem ? [<Text color="error">{clip(p.problem, cols * 2)}</Text>] : []),
+        field('Summary', p.summary, textWidth),
+        field('Rationale', p.rationale, textWidth),
+        note(`Source threads · ${p.sourceThreadIds.length}`),
+        ...sources.shown.map(title => <Text>{clip(`  ${title}`, cols)}</Text>),
+        ...more(sources.more),
+        <Box flexDirection="row" gap={1}>
+          <Button key="approve" variant="primary" onPress={press('approve')}>
+            {busyLabel('approve', 'Approve', 'Approving…')}
+          </Button>
+          <Button key="discard" variant="secondary" onPress={press('discard')}>
+            {busyLabel('discard', 'Discard', 'Discarding…')}
+          </Button>
+        </Box>,
+      ])
     }
 
     function renderDetail(t: LedgerThreadView) {
@@ -590,60 +891,71 @@ export const register: Register = (on, options) => {
       const sessionFit = fitList(t.sessions, 3)
       const relatedFit = fitList(related, 3)
       // Rows left for the three free texts once the fixed lines are drawn.
-      const fixed = 10 + (t.note ? 1 : 0) + Math.min(t.sessions.length, 3) + Math.min(related.length, 3)
+      const fixed = 14 + (t.note ? 1 : 0) + Math.min(t.sessions.length, 3) + Math.min(related.length, 3)
       const linesEach = Math.min(6, Math.max(1, Math.floor((rows - fixed) / 3)))
       const textWidth = linesEach * Math.max(10, cols - 8)
-      const field = (label: string, value: string | null) => (
-        <Text>
-          <Text dimColor>{`${label}: `}</Text>
-          {value ? clip(value, textWidth) : '—'}
-        </Text>
-      )
       const resume = t.lead ? `claude --resume ${t.lead}` : null
-      const stateText = t.state
-        ? `${t.effectiveState} (override)${t.suggestedReason ? ` · suggested: ${t.suggestedReason}` : ''}`
-        : `${t.effectiveState}${t.suggestedReason ? ` · ${t.suggestedReason}` : ''}`
       const lastAt = t.lastAt ? t.lastAt.slice(0, 16).replace('T', ' ') : 'unknown'
+      const color = statusKey(t.effectiveState, t.daysIdle)
+      const reason = t.state
+        ? `override${t.suggestedReason ? ` · suggested: ${t.suggestedReason}` : ''}`
+        : t.suggestedReason
 
-      return (
-        <Box flexDirection="column">
-          <Box flexDirection="row" gap={1}>
-            <Button key="back" role="dismiss" onPress={select(null)}>
-              Back
-            </Button>
-          </Box>
-          <Text bold>{clip(t.title, cols * 2)}</Text>
-          <Text>{clip(`${t.projectName} · ${t.key}`, cols)}</Text>
-          <Text>{clip(`State: ${stateText}`, cols)}</Text>
-          {t.note ? [<Text>{clip(`Note: ${t.note}`, cols)}</Text>] : []}
-          <Text>{clip(`Last activity: ${lastAt} · ${formatDays(t.daysIdle)} idle`, cols)}</Text>
-          {field('Recap', t.recap)}
-          {field('Ask', t.ask)}
-          {field('Last prompt', t.lastPrompt)}
-          <Text dimColor>{`Sessions (${t.sessions.length})`}</Text>
-          {sessionFit.shown.map(id => (
-            <Text>{clip(`  ${id}${id === t.lead ? ' (lead)' : ''}`, cols)}</Text>
+      return card([
+        <Box flexDirection="row">
+          <Button key="back" role="dismiss" onPress={select(null)}>
+            Back
+          </Button>
+        </Box>,
+        <Text size="body">{clip(t.title, cols * 2)}</Text>,
+        <Text size="caption" dimColor>
+          {clip(`${t.projectName} · ${t.key}`, cols)}
+        </Text>,
+        <Box flexDirection="row" gap={1}>
+          <Text color={color}>{`${STATUS_MARK} ${t.effectiveState}`}</Text>
+          {riskFacts(t.risk, t.notOnRemote).map(fact => (
+            <Text size="caption" dimColor>
+              {fact}
+            </Text>
           ))}
-          {more(sessionFit.more)}
-          {resume
-            ? [
-                <Box flexDirection="row" justifyContent="space-between">
-                  <Text>{clip(resume, cols - 8)}</Text>
-                  <Button key="copy" plain onPress={press => $.ui.copy({ text: resume, surface: press.surface })}>
-                    Copy
-                  </Button>
-                </Box>,
-              ]
-            : [<Text dimColor>No session to resume.</Text>]}
-          <Text dimColor>{`Related (${related.length})`}</Text>
-          {relatedFit.shown.map(r => (
-            <Button key={`related:${r.id}`} plain onPress={select(r.id)}>
-              {clip(`  ${r.projectName} · ${r.title} · ${r.effectiveState}`, cols)}
-            </Button>
-          ))}
-          {more(relatedFit.more)}
-        </Box>
-      )
+          <Text size="caption" dimColor tabular>
+            {clip(`${formatDays(t.daysIdle)} idle · last ${lastAt}`, cols)}
+          </Text>
+        </Box>,
+        ...(reason ? [note(clip(reason, cols))] : []),
+        ...(t.note ? [<Text>{clip(`Note: ${t.note}`, cols)}</Text>] : []),
+        field('Recap', t.recap, textWidth),
+        field('Ask', t.ask, textWidth),
+        field('Last prompt', t.lastPrompt, textWidth),
+        note(`Sessions · ${t.sessions.length}`),
+        ...sessionFit.shown.map(id => (
+          <Text size="footnote" tabular>
+            {clip(`  ${id}${id === t.lead ? ' (lead)' : ''}`, cols)}
+          </Text>
+        )),
+        ...more(sessionFit.more),
+        ...(resume
+          ? [
+              <Box flexDirection="row" justifyContent="space-between" gap={1}>
+                <Text size="footnote">{clip(resume, cols - 8)}</Text>
+                <Button key="copy" variant="secondary" onPress={press => $.ui.copy({ text: resume, surface: press.surface })}>
+                  Copy
+                </Button>
+              </Box>,
+            ]
+          : [note('No session to resume.')]),
+        note(`Related · ${related.length}`),
+        ...relatedFit.shown.map(r =>
+          row({
+            key: `related:${r.id}`,
+            color: statusKey(r.effectiveState, r.daysIdle),
+            name: `${r.projectName} · ${r.title}`,
+            meta: [r.effectiveState],
+            onPress: select(r.id),
+          }),
+        ),
+        ...more(relatedFit.more),
+      ])
     }
   })
 }

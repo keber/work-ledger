@@ -94,10 +94,14 @@ test('"Pieces to review" lists proposed pieces above the thread lists', { option
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
     const headings = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-    const pieces = headings.findIndex(t => t.startsWith('Pieces to review (2)'))
+    const pieces = headings.findIndex(t => t === 'PIECES TO REVIEW · 2')
     expect(pieces).toBeGreaterThanOrEqual(0)
-    expect(pieces).toBeLessThan(headings.findIndex(t => t.startsWith('At risk, recent')))
-    expect((await ui.find({ key: 'piece:2026-01-10-team-1' }))?.text).toBe('team · Piece 2026-01-10-team-1 · 0.80')
+    expect(pieces).toBeLessThan(headings.findIndex(t => t.startsWith('AT RISK, RECENT')))
+    expect(await ui.find({ type: 'Text', text: /^2 to review$/ })).toBeDefined()
+    expect((await ui.find({ key: 'row:piece:2026-01-10-team-1' }))?.text).toMatch(/team · Piece 2026-01-10-team-1/)
+    expect(await ui.find({ type: 'Text', text: /^0\.80$/ })).toBeDefined()
+    // The section is a card: the one list block with a border.
+    expect((await ui.find({ key: 'card:pieces' }))?.props.borderStyle).toBeDefined()
     expect(await ui.find({ key: 'piece:2026-01-10-public-1' })).toBeDefined()
     expect(await ui.find({ key: 'piece:2026-01-10-team-2' })).toBeUndefined()
     await ui.unmount()
@@ -109,8 +113,8 @@ test('no section at all when there is no inbox', { options: OPTIONS }, async ($,
   await $.command.run(LEDGER_COMMAND)
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect(await ui.find({ text: /Pieces to review/ })).toBeUndefined()
-    expect(await ui.find({ text: /At risk, recent/ })).toBeDefined()
+    expect(await ui.find({ text: /PIECES TO REVIEW/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^AT RISK, RECENT/ })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -124,7 +128,7 @@ for (const [name, files, pattern] of [
     await $.command.run(LEDGER_COMMAND)
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ ...PANE, surface })
-      expect(await ui.find({ text: /^Pieces to review/ })).toBeDefined()
+      expect(await ui.find({ text: /^PIECES TO REVIEW/ })).toBeDefined()
       expect(await ui.find({ type: 'Text', text: pattern })).toBeDefined()
       expect(await ui.find({ key: 'risk:r1' })).toBeDefined()
       await ui.unmount()
@@ -137,20 +141,25 @@ test('a piece shows summary, rationale and source titles from the ledger', { opt
   await $.command.run(LEDGER_COMMAND)
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
+    // Nothing in the pieces card is bold or amber either.
+    const tree = JSON.stringify(await ui.drawn())
+    expect(tree).not.toMatch(/"weight":"(bold|semibold)"|"bold":true|"warning"/)
     await ui.press({ key: 'piece:2026-01-10-team-1' })
+    expect(JSON.stringify(await ui.drawn())).not.toMatch(/"weight":"(bold|semibold)"|"bold":true|"warning"/)
     expect(await ui.find({ text: /Summary of 2026-01-10-team-1/ })).toBeDefined()
     expect(await ui.find({ text: /Rationale of 2026-01-10-team-1/ })).toBeDefined()
     expect(await ui.find({ text: /Ledger title r1/ })).toBeDefined()
     expect(await ui.find({ text: /Index title gone/ })).toBeDefined()
     expect(await ui.find({ text: /Index title r1/ })).toBeUndefined()
-    expect(await ui.find({ key: 'approve' })).toBeDefined()
-    expect(await ui.find({ key: 'discard' })).toBeDefined()
+    // Approve is the one primary action; Discard is secondary.
+    expect((await ui.find({ key: 'approve' }))?.props.variant).toBe('primary')
+    expect((await ui.find({ key: 'discard' }))?.props.variant).not.toBe('primary')
     expect(await ui.find({ text: /Check it for internal details before approving\./ })).toBeUndefined()
     await ui.press({ key: 'back' })
     await ui.press({ key: 'piece:2026-01-10-public-1' })
     expect(await ui.find({ text: /Check it for internal details before approving\./ })).toBeDefined()
     await ui.press({ key: 'back' })
-    expect(await ui.find({ text: /^Pieces to review/ })).toBeDefined()
+    expect(await ui.find({ text: /^PIECES TO REVIEW/ })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -198,7 +207,7 @@ test('Approve runs the CLI on a timer, then toasts and re-reads the inbox', { op
   expect(toasts).toEqual(['Piece approved.'])
   expect(indexReads()).toBe(2)
   expect(await ui.find({ key: 'approve' })).toBeUndefined()
-  expect((await ui.find({ text: /^Pieces to review/ }))?.text).toMatch(/\(1\)/)
+  expect((await ui.find({ type: 'Text', text: /^PIECES TO REVIEW/ }))?.text).toBe('PIECES TO REVIEW · 1')
   await ui.unmount()
 })
 
