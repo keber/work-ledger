@@ -118,3 +118,7 @@ Front matter: the lines between the first two `---` lines, one `key: value` per 
 | Uninstall | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\uninstall-weekly-task.ps1` |
 
 `-ExecutionPolicy Bypass` applies only to that PowerShell process; drop it if your policy already allows local scripts.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

@@ -34,5 +34,6 @@
       "description": "Curation inbox folder; the newest YYYY-MM-DD folder in it is shown.",
       "default": "~/Proyectos/work-ledger/out/pieces/inbox"
     }
-  }
+  },
+  "license": "MIT"
 }
