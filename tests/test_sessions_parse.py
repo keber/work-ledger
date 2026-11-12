@@ -91,6 +91,14 @@ class CountsTest(unittest.TestCase):
         self.assertEqual(facts["messages"], [["a1", "2026-11-01T10:02:00Z"],
                                              ["a2", "2026-11-01T10:01:00Z"]])
 
+    def test_entrypoint_most_common_value(self):
+        facts = parse(user(entrypoint="sdk-cli"), assistant_text("x", entrypoint="sdk-cli"),
+                      user(entrypoint="cli"))
+        self.assertEqual(facts["entrypoint"], "sdk-cli")
+
+    def test_entrypoint_missing_is_none(self):
+        self.assertIsNone(parse(user(), assistant_text("x"))["entrypoint"])
+
     def test_head_branch_is_detached_or_no_branch(self):
         facts = parse(user(branch="HEAD"), user(branch="HEAD"), user(branch=""), user(branch=None),
                       user(branch="main"))

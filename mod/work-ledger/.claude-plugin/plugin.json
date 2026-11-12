@@ -1,7 +1,7 @@
 {
   "name": "work-ledger",
   "version": "0.1.0",
-  "description": "Read-only pane showing pending and at-risk work from the work-ledger out/ledger.json.",
+  "description": "Read-only pane showing pending and at-risk work from the work-ledger out/ledger.json, and the retomar skill to resume a project with context rebuilt from the ledger, git and transcripts.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "ledgerPath": {

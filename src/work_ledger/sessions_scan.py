@@ -10,7 +10,7 @@ from .sessions_anchor import AnchorResolver, default_claude_home
 from .sessions_forks import detect_forks
 from .sessions_parse import parse_timestamp, parse_transcript
 
-CACHE_VERSION = 3  # 3: Git Bash drive paths normalized at parse time
+CACHE_VERSION = 4  # 4: entrypoint added; 3: Git Bash drive paths normalized at parse time
 CACHE_NAME = os.path.join(".cache", "sessions-cache.json")
 _INTERNAL = ("messages",)  # needed for fork detection, never emitted
 

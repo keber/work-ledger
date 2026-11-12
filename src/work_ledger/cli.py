@@ -1,9 +1,10 @@
 """Command line entry point.
 
-`python -m work_ledger inventory|sessions|threads|refresh|digest|notify|curate|pieces|weekly`.
+`python -m work_ledger inventory|sessions|threads|refresh|digest|notify|curate|pieces|weekly|context`.
 """
 
 import argparse
+import contextlib
 import os
 import sys
 from datetime import datetime, timezone
@@ -11,6 +12,12 @@ from datetime import datetime, timezone
 from . import config as settings
 from .collect import DEFAULT_IGNORE_UNTRACKED, error_repo, collect_repo
 from .config import CLAUDE_ENV, CONFIG_ENV, PUBLISH_ENV, ConfigError
+from .context_build import (DEFAULT_MAX_CHARS, DEFAULT_THREADS, DEFAULT_TRANSCRIPTS,
+                            build_overview, build_query_context, fit, render_json,
+                            render_markdown)
+from .context_git import live_git
+from .context_handoff import find_handoff
+from .context_transcript import read_excerpt
 from .curate_build import AUDIENCES, is_external, load_prompt, run_audience
 from .curate_claude import MODEL, ClaudeError, claude_port, resolve_claude
 from .curate_input import (build_input, input_text, previous_snapshot, project_names,
@@ -29,7 +36,8 @@ from .report import build_report, write_reports
 from .sessions_report import build_sessions_report, write_sessions_reports
 from .sessions_scan import CACHE_NAME, scan_sessions
 from .threads_build import build_ledger
-from .threads_inputs import InputError, check_schema, load_inputs, load_json
+from .threads_inputs import (SESSIONS_VERSIONS, InputError, check_schema, load_inputs,
+                             load_json)
 from .threads_report import write_ledger
 
 INVENTORY_JSON = "git-inventory.json"
@@ -150,7 +158,39 @@ def _parser():
         p.add_argument("--out", metavar="DIR", help="Output directory. Default: <project>/out")
     week = add("weekly", help="digest, curate, then notify (what the scheduled task runs)")
     week.add_argument("--out", metavar="DIR", help="Output directory. Default: <project>/out")
+    ctx = add("context", help=("Print what a project was about and where it stood, from the "
+                               "ledger, live git and transcripts (read-only, stdout only)"))
+    ctx.add_argument("query", nargs="?",
+                     help=("Project name, path or thread title fragment. Omit for an "
+                           "overview of recent and at-risk projects"))
+    ctx.add_argument("--ledger", metavar="PATH", help=f"Ledger JSON. Default: <out>/{LEDGER_JSON}")
+    ctx.add_argument("--json", action="store_true", help="Structured output (schemaVersion 1)")
+    ctx.add_argument("--threads", type=_at_least(1), default=DEFAULT_THREADS, metavar="N",
+                     help=f"Threads with sessions shown per project (default {DEFAULT_THREADS})")
+    ctx.add_argument("--transcripts", type=_at_least(0), default=DEFAULT_TRANSCRIPTS,
+                     metavar="K",
+                     help=("Top threads per project with transcript excerpts "
+                           f"(default {DEFAULT_TRANSCRIPTS})"))
+    ctx.add_argument("--max-chars", type=_at_least(MIN_CONTEXT_CHARS), default=DEFAULT_MAX_CHARS,
+                     metavar="C", help=f"Output size cap (default {DEFAULT_MAX_CHARS})")
+    ctx.add_argument("--refresh", action="store_true",
+                     help="Run refresh (default out dir) before reading the ledger")
     return parser
+
+
+MIN_CONTEXT_CHARS = 500
+
+
+def _at_least(minimum):
+    def parse(value):
+        try:
+            number = int(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"not an integer: {value}") from None
+        if number < minimum:
+            raise argparse.ArgumentTypeError(f"must be at least {minimum}: {value}")
+        return number
+    return parse
 
 
 def _add_check_options(parser):
@@ -551,6 +591,83 @@ def weekly(out_dir=None, config=None, company=None, claude=None):
     return notify_code or curate_code
 
 
+def _emit(text):
+    """Print text; characters the stream cannot encode become '?' instead of raising."""
+    try:
+        sys.stdout.write(text + "\n")
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+        sys.stdout.write((text + "\n").encode(encoding, "replace").decode(encoding))
+
+
+_INDEX_FIELDS = ("transcriptPath", "firstAt", "lastAt", "entrypoint", "userMessages",
+                 "assistantMessages", "titleSource", "fork",
+                 "lastPrompt")
+
+
+def _sessions_index(ledger, ledger_path):
+    """(index, source root): {session id: facts} and the transcripts root it was scanned from.
+
+    Tries the path the ledger recorded, then sessions.json next to the ledger. The index is
+    None when no sessions report reads. The root is the report's `sourceRoot`, else the
+    default ~/.claude/projects.
+    """
+    recorded = (((ledger.get("inputs") or {}).get("sessions")) or {}).get("path")
+    beside = os.path.join(os.path.dirname(os.path.abspath(ledger_path)), SESSIONS_JSON)
+    for path in (recorded, beside):
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            report = check_schema(load_json(path, "sessions"), "sessions", SESSIONS_VERSIONS)
+        except InputError as exc:
+            print(f"warning: {exc}", file=sys.stderr)
+            continue
+        index = {s["sessionId"]: {k: s.get(k) for k in _INDEX_FIELDS}
+                 for s in report.get("sessions") or []
+                 if isinstance(s, dict) and isinstance(s.get("sessionId"), str)}
+        root = report.get("sourceRoot")
+        return index, root if isinstance(root, str) and root else default_sessions_source()
+    return None, default_sessions_source()
+
+
+def context_command(query=None, ledger_path=None, as_json=False, threads=DEFAULT_THREADS,
+                    transcripts=DEFAULT_TRANSCRIPTS, max_chars=DEFAULT_MAX_CHARS,
+                    refresh_first=False, config=None, git_reader=live_git):
+    """Print the resume context. Read-only: transcript text goes to stdout only.
+
+    Exit 1 when the ledger cannot be read or no project matches the query.
+    """
+    if refresh_first:
+        with contextlib.redirect_stdout(sys.stderr):  # keep stdout for the context itself
+            code = refresh(None, config=config)
+        if code:
+            return code
+    ledger_path = ledger_path or os.path.join(default_out(), LEDGER_JSON)
+    try:
+        ledger = _load_ledger(ledger_path)
+    except InputError as exc:
+        print(f"error: {exc} (run `python -m work_ledger refresh` or pass --refresh)",
+              file=sys.stderr)
+        return 1
+    now = _now()
+    shown_path = to_posix(ledger_path)
+    index, source_root = _sessions_index(ledger, ledger_path)
+    if query:
+        # Only .jsonl files under the sessions source are opened (see is_transcript_path).
+        def excerpt(path, seen=None):
+            return read_excerpt(path, seen=seen, source_root=source_root)
+
+        ctx = build_query_context(ledger, query, now, git_reader=git_reader,
+                                  sessions_index=index, read_excerpt=excerpt,
+                                  handoff_reader=find_handoff, threads=threads,
+                                  transcripts=transcripts, ledger_path=shown_path)
+    else:
+        ctx = build_overview(ledger, now, ledger_path=shown_path, sessions_index=index)
+    text, ctx = fit(ctx, max_chars, render_json if as_json else render_markdown)
+    _emit(text.rstrip("\n"))
+    return 1 if query and not ctx["projects"] else 0
+
+
 def _load_settings(args):
     """Config from --config, $WORK_LEDGER_CONFIG or the project's local file. Raises ConfigError."""
     path, explicit = settings.config_path(args.config, os.environ, _project_root())
@@ -601,6 +718,10 @@ def main(argv=None):
         return _threads_main(parser, args)
     if args.command == "refresh":
         return refresh(args.out, config=args.config)
+    if args.command == "context":
+        return context_command(args.query, args.ledger, args.json, args.threads,
+                               args.transcripts, args.max_chars, args.refresh,
+                               config=args.config)
 
     explicit_roots = settings.roots(args.root, {}, settings.Config(), [])
     if explicit_roots:

@@ -163,14 +163,14 @@ class CacheTest(_ScanBase):
         self.scan(parse=spy)
         self.assertEqual(spy.calls, ["a.jsonl"])
 
-    def test_cache_version_is_3_and_older_caches_are_reparsed(self):
-        self.assertEqual(CACHE_VERSION, 3)
+    def test_cache_version_is_4_and_older_caches_are_reparsed(self):
+        self.assertEqual(CACHE_VERSION, 4)
         self.transcript("p", "a", user())
         self.scan()
         with open(self.cache, encoding="utf-8") as fh:
             cached = json.load(fh)
-        self.assertEqual(cached["schemaVersion"], 3)
-        cached["schemaVersion"] = 2
+        self.assertEqual(cached["schemaVersion"], 4)
+        cached["schemaVersion"] = 3
         with open(self.cache, "w", encoding="utf-8") as fh:
             json.dump(cached, fh)
         spy = ParseSpy()
