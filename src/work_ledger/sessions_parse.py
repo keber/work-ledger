@@ -122,6 +122,7 @@ class _Facts:
         self.assistant_anonymous = 0
         self.cwds = Counter()
         self.branches = Counter()
+        self.entrypoints = Counter()  # "sdk-cli" marks a headless `claude -p` run
         self.no_branch = 0
         self.relocated = None
         self.writes = Counter()
@@ -167,6 +168,9 @@ class _Facts:
         cwd = normalize_session_path(record.get("cwd"))
         if cwd:
             self.cwds[cwd] += 1
+        entrypoint = record.get("entrypoint")
+        if isinstance(entrypoint, str) and entrypoint:
+            self.entrypoints[entrypoint] += 1
         branch = record.get("gitBranch")
         # Transcripts record "HEAD" when not on a branch (detached).
         if isinstance(branch, str) and branch and branch != DETACHED_BRANCH:
@@ -234,6 +238,7 @@ class _Facts:
                         "sessionSummarySaved": self.summary_saved,
                         "endedWithQuestion": self.ended_with_question},
             "lastPrompt": self.last_prompt,
+            "entrypoint": self.entrypoints.most_common(1)[0][0] if self.entrypoints else None,
             "malformedLines": self.malformed,
             "messages": self.messages,
         }
