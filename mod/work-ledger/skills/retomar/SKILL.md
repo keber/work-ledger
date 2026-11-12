@@ -1,6 +1,6 @@
 ---
 name: retomar
-description: Resume abandoned or paused work with a short project brief rebuilt from the work-ledger, live git state, repo handoff notes and past Claude Code transcripts. Use when the user wants to resume or pick up a project, asks "what was I doing", "what was project X about", "where did X stand", "what is pending in X", starts the day (morning kickoff, "what am I on"), or says "en qué estaba", "retomar", "retomemos X", "de qué se trataba X", "en qué quedó X".
+description: Resume abandoned or paused work with a short project brief rebuilt from the work-ledger, live git state, repo handoff notes and past Claude Code transcripts. Use when the user wants to resume or pick up a project, asks "what was I doing", "what was project X about", "where did X stand", "what is pending in X", starts the day (morning kickoff, "what am I on"), or says "en qué estaba", "retomar", "retomemos X", "de qué se trataba X", "en qué quedó X", "retomemos este proyecto", "no me acuerdo en qué quedó X".
 ---
 
 # Retomar: resume a project with context
@@ -33,8 +33,14 @@ Set-Location $root; $env:PYTHONPATH = "src"; $env:PYTHONIOENCODING = "utf-8"; py
 
 - `<query>`: a fragment of the project name, path or a thread title, from the user's words
   ("exportadora", "sispro"). Several projects may match; all are included.
-- No project named ("en qué estaba", morning kickoff): run it without a query for the
-  overview of projects active in the last 14 days or at risk.
+- The user means this project without naming it ("retomemos este proyecto", "en qué quedó
+  esto"): resolve it from the session's working directory, before changing directory to
+  the work-ledger root. Run `git rev-parse --path-format=absolute --git-common-dir` there;
+  the project is the folder that contains that `.git` (the main repo, also from inside a
+  worktree). Outside a git repo, use the working directory itself. Use that folder's name
+  as `<query>`.
+- No project meant at all ("en qué estaba", morning kickoff): run it without a query for
+  the overview of projects active in the last 14 days or at risk.
 - Exit code 1 with "No project matches": show the closest names it printed and ask which
   one. Nothing else.
 - Error about the ledger, or the header says the ledger is more than a few days old: rerun

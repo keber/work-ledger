@@ -42,6 +42,14 @@ class RetomarSkillTest(unittest.TestCase):
             code = exc.code
         self.assertIsNone(code)
 
+    def test_unnamed_current_project_resolves_from_cwd(self):
+        self.assertIn("este proyecto", self.fields["description"])
+        self.assertIn("no me acuerdo", self.fields["description"])
+        body = " ".join(self.body.split())
+        self.assertIn("this project", body)
+        self.assertIn("git rev-parse --path-format=absolute --git-common-dir", body)
+        self.assertIn("before changing directory", body)
+
     def test_one_next_step_no_menus(self):
         self.assertIn("ONE", self.body)
         self.assertIn("No option menus", self.body)
